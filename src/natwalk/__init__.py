@@ -1,7 +1,8 @@
 """Navigate autoregressive distributions in fixed-information steps."""
 
 from .model import Cursor
-from .navigation import Navigation, State as NavigationState
+from .navigation import Navigation
+from .navigation import State as NavigationState
 from .query import Suggestion, completions, greedy
 from .search import Search
 from .session import Session
