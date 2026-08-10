@@ -2,117 +2,192 @@
 
 **Navigate autoregressive distributions in information space.**
 
-`natwalk` is an interaction primitive for generative models where progress is measured in **nats/bits**, not tokens, characters, seconds, or pixels.
+`natwalk` is an interaction primitive for causal probabilistic models. A user supplies fixed-information choices while a background uniform-cost search discovers likely model continuations. Browsing the discovered tree is inspection only: it never changes the probability state being searched.
 
-A backend exposes the complete next-token distribution and a causal cursor. natwalk can then:
+The core intentionally has no top-k/top-p truncation.
 
-- narrow the distribution by exact equal-information arithmetic-code actions,
-- search the model's token tree with Dijkstra / uniform-cost search in surprisal,
-- expose hidden residual probability as an exact `…` branch,
-- accept a greedy continuation up to a fixed information budget,
-- undo user actions without changing the probability semantics.
+## Model interface
 
-No top-k or top-p truncation is part of the core.
+A backend is one rewindable causal cursor:
 
-## Exact arithmetic navigation
+```python
+from collections.abc import Sequence
 
-With `K` choices, one user action selects one of `K` equal-width subintervals of the current arithmetic-code interval and therefore supplies exactly
+class Cursor:
+    def predict(self) -> Sequence[float]:
+        """Return the complete normalized next-symbol distribution.
+
+        Return an empty sequence at end of generation.
+        """
+
+    def observe(self, token: int) -> None:
+        """Advance the causal state by one token."""
+
+    def checkpoint(self) -> object:
+        """Return a cheap rewind point."""
+
+    def restore(self, checkpoint: object) -> None:
+        """Restore a previous rewind point."""
+```
+
+There is no clone fallback and no required public prefix/ended state. Large transformer backends can keep one mutable KV allocation and checkpoint only the logical controls needed to rewind it.
+
+## One probability tree
+
+`Tree` is the single representation of discovered model knowledge.
+
+An expanded node stores its complete probability-ranked distribution. Its vocabulary children are virtual: a concrete `Node` is allocated only when that child acquires a known subtree or somebody needs its identity. This lets the renderer inspect rank 50,000 without constructing 50,000 Python tree nodes.
+
+A concrete node stores only:
+
+```text
+parent node id
+rank within the parent's distribution
+optional known distribution
+map of concrete child ranks -> node ids
+```
+
+Tokens, edge surprisal, paths, depth, and cumulative path cost are derived.
+
+## Dijkstra in information distance
+
+For a token edge with conditional probability `p`:
+
+```text
+edge cost = -ln p
+```
+
+`Search` performs synchronous uniform-cost search from the committed root. Every expanded parent's children are already ordered from highest to lowest probability, therefore their edge costs are nondecreasing.
+
+Instead of putting the whole vocabulary on the global heap, each expanded parent contributes only the head of its sorted sibling stream. When `(parent, rank)` is popped:
+
+```text
+queue (parent, rank + 1)
+expand child(parent, rank)
+queue (child, 0)
+```
+
+The heap is therefore a k-way merge of sorted child streams and produces the same expansion order as eager full-frontier Dijkstra. The test suite checks this against an intentionally stupid eager implementation over randomized finite probability trees.
+
+`Search.step()` is entirely synchronous. `SearchWorker` is only a thread/lock wrapper around the same method; concurrency does not have separate search semantics.
+
+## Session and committed state
+
+`Session` owns:
+
+```text
+model cursor
+committed trie root
+checkpoint at that root
+probability tree
+Dijkstra frontier
+```
+
+Search speculation always restores the committed checkpoint, replays from the committed root to the candidate node, predicts, and restores the checkpoint again.
+
+`Session.commit(tokens)` is the one token-commit path. Advancing the committed root resets the Dijkstra frontier relative to the new root but keeps already discovered trie knowledge.
+
+Inspection is separate: `Session.inspect(node)` may cache a descendant distribution without changing either the committed cursor or the search frontier.
+
+## Fixed-information navigation
+
+`Navigation` owns the pending arithmetic interval and user-action undo history.
+
+With `K` choices, one action divides the current interval into `K` equal-width pieces, corresponding conceptually to
 
 $$
 \ln K \text{ nats} = \log_2 K \text{ bits}.
 $$
 
-For binary navigation (`K = 2`), every `0`/`1` action is exactly one bit.
+Tokens are committed only when the whole selected interval lies inside one token cell. If a choice forces no token, the committed root, model cursor, probability tree, and Dijkstra frontier are unchanged.
 
-If the selected interval lies completely inside one model token interval, that token is forced and committed. The interval is renormalized inside that token and the process repeats.
+That separation is important: arithmetic narrowing is interaction state, not a search filter.
 
-## Token-tree search
+Explicit completion acceptance commits a path through the same `Session.commit()` primitive and clears the pending arithmetic interval. Undo restores model/session state only when the action actually changed the committed root; undoing arithmetic-only narrowing leaves whatever search progress happened meanwhile intact.
 
-The model tree uses token surprisal as edge cost:
+The current interval implementation uses Python floating point. The information semantics are exact conceptually, but the current arithmetic representation is not an integer arithmetic coder.
 
-$$
-c(y_t) = -\ln p(y_t \mid y_{<t}).
-$$
+## View state
 
-Therefore a prefix has cumulative cost
-
-$$
-g(y_{1:n}) = -\ln P(y_{1:n}).
-$$
-
-`TokenTreeExplorer` expands the smallest cumulative cost first: **Dijkstra in information distance**, not BFS by token depth and not beam search.
-
-One model call exposes the complete ranked distribution at a prefix. Children are materialized lazily. Only the cheapest unseen sibling of each expanded parent needs to sit on the global heap; when it is popped, the next sibling is exposed. This is equivalent to inserting the whole vocabulary into the heap without the vocabulary-sized frontier blow-up.
-
-There is no search depth limit. `max_nodes` is only a resource cap.
-
-### Exact ellipsis
-
-If some children are not materialized/displayed, `…` represents their aggregate probability mass:
-
-$$
-p_{\ldots} = \sum_{i \in \text{hidden}} p_i,
-\qquad
-c_{\ldots} = -\ln p_{\ldots}.
-$$
-
-So the ellipsis is a real probability region, not UI hand-waving.
-
-## Budgeted greedy autocomplete
-
-Space can accept the longest greedy continuation whose cumulative surprisal fits a budget `B`:
-
-$$
-\sum_t -\log_2 p(y_t \mid y_{<t}) \le B.
-$$
-
-A confident model may fit many tokens into two bits. An uncertain model may fit none.
+Tree browsing is represented as a small zipper-like `View`:
 
 ```python
-from natwalk import Navigator
-
-nav = Navigator(cursor, choices=2)
-
-suggestion = nav.greedy_suggestion(max_bits=2.0)
-accepted = nav.accept_greedy(max_bits=2.0)
-nav.undo()
+View(
+    node=x,
+    first_rank=k,
+    selected_rank=i,
+)
 ```
 
-Greedy acceptance is an explicit autocomplete action. It resets any partially narrowed arithmetic interval to `[0, 1)`.
+Its meaning is approximately **"show children of node `x` starting at sibling rank `k`"**.
 
-## Backend API
+The renderer derives frame rows directly from the probability tree. Viewport clipping, sibling tails, indentation, and future corridor compression are rendering decisions rather than search state.
 
-The minimal backend is:
+Browsing or materializing a child identity does not enqueue it for Dijkstra.
+
+## Completion queries
+
+Suggestions are read-only queries over known trie state:
 
 ```python
-class Cursor:
-    prefix: tuple[int, ...]
-    ended: bool
+from natwalk import completions, greedy
 
-    def predict(self) -> Sequence[float]:
-        """Return the COMPLETE normalized next-token distribution."""
-
-    def observe(self, token: int) -> None:
-        """Commit one token and advance causal state."""
-
-    def clone(self) -> "Cursor":
-        """Fork the causal state."""
+suggestion = greedy(tree, root, max_nats=1.5)
+options = completions(tree, root, max_nats=1.5)
 ```
 
-Large transformer backends should usually also implement:
+If the search has not discovered enough of a path, a suggestion is marked incomplete. The query layer never performs model evaluation or mutates the tree.
+
+## Minimal example
 
 ```python
-def checkpoint(self) -> object: ...
-def restore(self, checkpoint: object) -> None: ...
+from natwalk import Navigation, Session
+
+
+class TableCursor:
+    def __init__(self):
+        self.prefix = ()
+        self.table = {
+            (): (0.7, 0.3),
+            (0,): (0.8, 0.2),
+        }
+
+    def predict(self):
+        return self.table.get(self.prefix, ())
+
+    def observe(self, token):
+        self.prefix = (*self.prefix, token)
+
+    def checkpoint(self):
+        return self.prefix
+
+    def restore(self, checkpoint):
+        self.prefix = checkpoint
+
+
+session = Session(TableCursor())
+navigation = Navigation(session, choices=2)
+
+session.search.step()      # discover one Dijkstra node
+forced = navigation.choose(0)
+navigation.undo()
 ```
 
-natwalk then speculates by rewinding lightweight cursor controls rather than cloning bulk KV tensors.
+## Demos
 
-## MuScriptor demo
+### llama.cpp / GGUF
 
-The first live backend is [MuScriptor](https://github.com/muscriptor/muscriptor), using its complete 1,393-symbol transcription distribution.
+`examples/llm_app.py` can resolve an existing Ollama model directly to its GGUF blob:
 
-With sibling checkouts at `~/Projects/muscriptor` and `~/Projects/natwalk`:
+```bash
+uv run examples/llm_app.py \
+  --model ministral-3:14b \
+  "The most surprising thing about information theory is"
+```
+
+### MuScriptor
+
+With sibling checkouts of MuScriptor and natwalk:
 
 ```bash
 uv run \
@@ -125,53 +200,4 @@ uv run \
   --chunk 0
 ```
 
-The CLI defaults to binary navigation and a 2-bit Space suggestion:
-
-```text
-Budget: 2.00 bit    binary action: 1.00 bit
-
-Committed:
-tie · t=0.23s · program(acoustic_guitar) · note_on
-
-Suggestion [1.87/2.00 bit]:
-A2 · t=0.45s · note_off · A2 · note_on · E3
-
-tree: 84 nodes · 31 model expansions · 12 frontier · ⟳
-
-  ▶ ├┬ A2                              0.09 nat
-  │  ├┬ t=0.45s                        0.13 nat
-  │  │  ├┬ note_off                    0.18 nat
-  │  │  │  └─ …  +1389 hidden          0.12 nat
-  ├─ E3                                1.31 nat
-  ├─ program(clean_electric_guitar)    1.72 nat
-  └─ …  +1388 hidden                   2.04 nat
-```
-
-Controls:
-
-```text
-0 / 1       choose an exact binary arithmetic half
-Space       accept the highlighted greedy suggestion
-Backspace   undo the previous user action
-[ / ]       decrease / increase suggestion budget
-↑ / ↓       browse the rendered tree
-← / →       collapse / expand a rendered subtree
-d           toggle debug interval/cost details
-q           quit
-```
-
-MuScriptor `shift` tokens are rendered as `t=...s`: they are absolute 100 Hz positions inside the current 5-second chunk, not time deltas.
-
-The demo currently operates on one 5-second MuScriptor chunk. Cross-chunk tie/prelude state is not wired into natwalk yet.
-
-## Why `natwalk`?
-
-Ordinary autocomplete asks:
-
-> how many tokens should I suggest?
-
-natwalk asks:
-
-> how much information should this interaction specify?
-
-That same primitive can apply to text, code, music, speech, image tokens, or any other causal probabilistic model.
+Both demos use the same shared TUI and the same search/navigation/view state model. Backend-specific code is limited to model checkpointing, prediction, observation, and token display.
