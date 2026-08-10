@@ -29,20 +29,15 @@ class Node:
 
     parent: NodeId | None
     rank: int
-    path_nats: float
     distribution: Distribution | None = None
     children: dict[int, NodeId] = field(default_factory=dict)
 
 
 class Tree:
-    """Arena-backed probability trie.
-
-    Child identity is ``(parent, rank)``. Token IDs, edge costs, paths, and
-    depths are derived from that relation instead of being stored redundantly.
-    """
+    """Arena-backed probability trie."""
 
     def __init__(self) -> None:
-        self.nodes: list[Node] = [Node(parent=None, rank=-1, path_nats=0.0)]
+        self.nodes: list[Node] = [Node(parent=None, rank=-1)]
 
     @property
     def root(self) -> NodeId:
@@ -65,13 +60,7 @@ class Tree:
             return existing
 
         child_id = len(self.nodes)
-        self.nodes.append(
-            Node(
-                parent=parent_id,
-                rank=rank,
-                path_nats=parent.path_nats + distribution.nats(rank),
-            )
-        )
+        self.nodes.append(Node(parent=parent_id, rank=rank))
         parent.children[rank] = child_id
         return child_id
 
@@ -89,7 +78,9 @@ class Tree:
         if node.parent is None:
             return 0.0
         parent = self.nodes[node.parent]
-        return node.path_nats - parent.path_nats
+        if parent.distribution is None:
+            raise RuntimeError("node parent is unexpectedly unexpanded")
+        return parent.distribution.nats(node.rank)
 
     def path(self, node_id: NodeId) -> tuple[int, ...]:
         return self.path_from(self.root, node_id)
@@ -106,3 +97,15 @@ class Tree:
             current = node.parent
         tokens.reverse()
         return tuple(tokens)
+
+    def path_nats(self, node_id: NodeId, *, ancestor: NodeId = 0) -> float:
+        """Derive cumulative surprisal from ``ancestor`` to ``node_id``."""
+        total = 0.0
+        current = node_id
+        while current != ancestor:
+            node = self.nodes[current]
+            if node.parent is None:
+                raise ValueError("node is not a descendant of ancestor")
+            total += self.edge_nats(current)
+            current = node.parent
+        return total
