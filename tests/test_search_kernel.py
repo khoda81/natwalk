@@ -16,9 +16,7 @@ def distribution(probabilities: list[float]) -> Distribution:
     ranked = sorted(enumerate(probabilities), key=lambda item: item[1], reverse=True)
     return Distribution(
         tokens=tuple(token for token, _ in ranked),
-        nats=tuple(
-            -math.log(probability) if probability > 0.0 else math.inf for _, probability in ranked
-        ),
+        probabilities=tuple(probability for _, probability in ranked),
     )
 
 
@@ -41,8 +39,8 @@ def full_frontier_order(table: Table) -> list[tuple[tuple[int, ...], float]]:
         dist = table.get(path)
         if dist is None:
             continue
-        for token, edge_nats in zip(dist.tokens, dist.nats, strict=True):
-            heapq.heappush(heap, (path_nats + edge_nats, (*path, token)))
+        for rank, token in enumerate(dist.tokens):
+            heapq.heappush(heap, (path_nats + dist.nats(rank), (*path, token)))
 
     return out
 
@@ -126,9 +124,6 @@ class SearchTests(unittest.TestCase):
 
         tree = Tree()
         search = Search(tree, table_evaluator(table))
-
-        # A renderer/view is allowed to ask for arbitrary virtual children.
-        # Allocating one must not enqueue or expand it.
         tree.child(tree.root, 2)
 
         actual = []
@@ -148,12 +143,9 @@ class SearchTests(unittest.TestCase):
                 if depth >= max_depth or (path and rng.random() < 0.25):
                     return
                 width = rng.randint(1, 5)
-                # Continuous random positive weights make cost ties vanishingly
-                # unlikely, so the reference and lazy search have one pop order.
                 weights = [0.05 + rng.random() for _ in range(width)]
                 total = sum(weights)
-                probs = [weight / total for weight in weights]
-                dist = distribution(probs)
+                dist = distribution([weight / total for weight in weights])
                 table[path] = dist
                 for token in dist.tokens:
                     grow((*path, token), depth + 1)
