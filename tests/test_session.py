@@ -66,6 +66,19 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(len(session.tree.nodes), known_nodes)
         self.assertIsNotNone(session.tree[root].distribution)
 
+    def test_inspection_caches_distribution_without_changing_frontier_or_cursor(self) -> None:
+        cursor = TableCursor(self.make_table())
+        session = Session(cursor)
+        child = session.tree.child(session.root, 1)
+        frontier = tuple(session.search.frontier)
+
+        distribution = session.inspect(child)
+
+        self.assertEqual(distribution.tokens, (0, 1))
+        self.assertEqual(cursor.prefix, ())
+        self.assertEqual(tuple(session.search.frontier), frontier)
+        self.assertIs(session.tree[child].distribution, distribution)
+
     def test_empty_commit_is_noop(self) -> None:
         cursor = TableCursor(self.make_table())
         session = Session(cursor)
