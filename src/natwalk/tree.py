@@ -1,12 +1,8 @@
-"""Persistent discovered probability tree.
-
-The tree stores model knowledge, not view state or search scheduling state.
-An expanded node owns its complete ranked next-symbol distribution. Child
-nodes are allocated only when some consumer needs a concrete subtree.
-"""
+"""Persistent discovered probability tree."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 NodeId = int
@@ -14,16 +10,17 @@ NodeId = int
 
 @dataclass(frozen=True, slots=True)
 class Distribution:
-    """A complete next-symbol distribution in descending probability order.
-
-    ``nats[i]`` is ``-log p(tokens[i])``. Empty distributions are terminal.
-    """
+    """A complete next-symbol distribution in descending probability order."""
 
     tokens: tuple[int, ...]
-    nats: tuple[float, ...]
+    probabilities: tuple[float, ...]
 
     def __len__(self) -> int:
         return len(self.tokens)
+
+    def nats(self, rank: int) -> float:
+        probability = self.probabilities[rank]
+        return -math.log(probability) if probability != 0.0 else math.inf
 
 
 @dataclass(slots=True)
@@ -72,7 +69,7 @@ class Tree:
             Node(
                 parent=parent_id,
                 rank=rank,
-                path_nats=parent.path_nats + distribution.nats[rank],
+                path_nats=parent.path_nats + distribution.nats(rank),
             )
         )
         parent.children[rank] = child_id
