@@ -17,8 +17,7 @@ def distribution(probabilities: list[float]) -> Distribution:
     return Distribution(
         tokens=tuple(token for token, _ in ranked),
         nats=tuple(
-            -math.log(probability) if probability > 0.0 else math.inf
-            for _, probability in ranked
+            -math.log(probability) if probability > 0.0 else math.inf for _, probability in ranked
         ),
     )
 
