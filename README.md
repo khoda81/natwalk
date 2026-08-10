@@ -13,6 +13,7 @@ A backend is one rewindable causal cursor:
 ```python
 from collections.abc import Sequence
 
+
 class Cursor:
     def predict(self) -> Sequence[float]:
         """Return the complete normalized next-symbol distribution.
@@ -168,7 +169,7 @@ class TableCursor:
 session = Session(TableCursor())
 navigation = Navigation(session, choices=2)
 
-session.search.step()      # discover one Dijkstra node
+session.search.step()  # discover one Dijkstra node
 forced = navigation.choose(0)
 navigation.undo()
 ```
