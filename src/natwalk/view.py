@@ -51,6 +51,7 @@ def iter_rows(tree: Tree, view: View):
             child_id = parent.children.get(rank)
             child = tree[child_id] if child_id is not None else None
             is_last = rank == len(distribution) - 1
+            edge_nats = distribution.nats(rank)
             yield Row(
                 parent=parent_id,
                 rank=rank,
@@ -58,8 +59,8 @@ def iter_rows(tree: Tree, view: View):
                 ancestor_last=ancestor_last,
                 is_last=is_last,
                 token=distribution.tokens[rank],
-                edge_nats=distribution.nats[rank],
-                path_nats=parent.path_nats + distribution.nats[rank],
+                edge_nats=edge_nats,
+                path_nats=parent.path_nats + edge_nats,
                 child=child_id,
                 expanded=child is not None and child.distribution is not None,
             )
