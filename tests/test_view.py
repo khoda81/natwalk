@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import unittest
 
 from natwalk.search import Search
@@ -12,7 +11,7 @@ def distribution(*probabilities: float) -> Distribution:
     ranked = sorted(enumerate(probabilities), key=lambda item: item[1], reverse=True)
     return Distribution(
         tokens=tuple(token for token, _ in ranked),
-        nats=tuple(-math.log(probability) for _, probability in ranked),
+        probabilities=tuple(probability for _, probability in ranked),
     )
 
 
