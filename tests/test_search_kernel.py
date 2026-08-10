@@ -65,6 +65,29 @@ class TreeTests(unittest.TestCase):
 
 
 class SearchTests(unittest.TestCase):
+    def test_preexpanded_root_still_seeds_frontier(self) -> None:
+        table = {(): distribution([0.7, 0.3])}
+        tree = Tree()
+        tree[0].distribution = table[()]
+
+        search = Search(tree, table_evaluator(table))
+
+        self.assertEqual(tree.path(search.step()), (0,))
+
+    def test_reset_reuses_known_distribution_at_new_root(self) -> None:
+        table = {
+            (): distribution([0.7, 0.3]),
+            (0,): distribution([0.6, 0.4]),
+        }
+        tree = Tree()
+        search = Search(tree, table_evaluator(table))
+        child = search.step()
+        assert child is not None
+
+        search.reset(child)
+
+        self.assertEqual(tree.path(search.step()), (0, 0))
+
     def test_zero_probability_tail_never_enters_frontier(self) -> None:
         table = {(): distribution([0.75, 0.25, 0.0])}
         tree = Tree()
