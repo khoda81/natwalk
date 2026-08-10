@@ -42,30 +42,39 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(cursor.prefix, ())
         self.assertEqual(session.root, session.tree.root)
 
-    def test_accept_is_the_single_committed_path_mutation(self) -> None:
+    def test_commit_is_the_only_committed_path_mutation(self) -> None:
         cursor = TableCursor(self.make_table())
         session = Session(cursor)
 
-        root = session.accept((0, 1))
+        root = session.commit((0, 1))
 
         self.assertEqual(cursor.prefix, (0, 1))
         self.assertEqual(session.tree.path(root), (0, 1))
         self.assertEqual(session.search.root, root)
-        self.assertEqual(session.undo_depth, 1)
 
-    def test_undo_restores_root_but_keeps_discovered_tree(self) -> None:
+    def test_restore_changes_execution_root_but_keeps_discovered_tree(self) -> None:
         cursor = TableCursor(self.make_table())
         session = Session(cursor)
-        root = session.accept((0, 1))
+        checkpoint = session.checkpoint()
+        root = session.commit((0, 1))
         known_nodes = len(session.tree.nodes)
         self.assertIsNotNone(session.tree[root].distribution)
 
-        self.assertTrue(session.undo())
+        session.restore(checkpoint)
 
         self.assertEqual(cursor.prefix, ())
         self.assertEqual(session.root, session.tree.root)
         self.assertEqual(len(session.tree.nodes), known_nodes)
         self.assertIsNotNone(session.tree[root].distribution)
+
+    def test_empty_commit_is_noop(self) -> None:
+        cursor = TableCursor(self.make_table())
+        session = Session(cursor)
+        frontier = tuple(session.search.frontier)
+
+        self.assertEqual(session.commit(()), session.root)
+        self.assertEqual(cursor.prefix, ())
+        self.assertEqual(tuple(session.search.frontier), frontier)
 
     def test_terminal_is_an_empty_distribution_not_a_cursor_flag(self) -> None:
         cursor = TableCursor({(): ()})
