@@ -14,6 +14,7 @@ from .core import (
     TreeEntry,
     TreeExplorer,
 )
+from .suggestions import accept_completion, cached_budget_completions
 
 __all__ = [
     "Cursor",
@@ -28,5 +29,7 @@ __all__ = [
     "TokenTreeExplorer",
     "TreeEntry",
     "TreeExplorer",
+    "accept_completion",
+    "cached_budget_completions",
 ]
 __version__ = "0.2.0"
