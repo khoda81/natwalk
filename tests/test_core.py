@@ -3,11 +3,11 @@ from __future__ import annotations
 import math
 import unittest
 
-from natwalk import Navigator, TreeExplorer
+from natwalk import Navigator, TokenTreeExplorer
 
 
 class TableCursor:
-    """Tiny exact backend for testing the arithmetic navigation invariants."""
+    """Tiny exact backend for testing arithmetic and tree invariants."""
 
     def __init__(self, table, prefix=(), eos=99):
         self.table = table
@@ -110,40 +110,118 @@ class NavigatorTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertEqual(cursor.clones, 0)
 
-    def test_preview_path_restores_root(self):
-        cursor = RewindCursor()
-        nav = Navigator(cursor, choices=5, preview_tokens=2)
-        preview = nav.preview_path((4, 0, 1))
-        self.assertEqual(preview.bucket, 1)
-        self.assertEqual(cursor.prefix, ())
+    def test_greedy_suggestion_is_budgeted_by_surprisal(self):
+        table = {
+            (): [0.8, 0.2],
+            (0,): [0.9, 0.1],
+            (0, 0): [0.6, 0.4],
+            (0, 0, 0): [0.5, 0.5],
+        }
+        nav = Navigator(TableCursor(table), choices=2)
+        budget = (-math.log2(0.8) - math.log2(0.9)) + 1e-9
+        suggestion = nav.greedy_suggestion(max_bits=budget)
+        self.assertEqual(suggestion.tokens, (0, 0))
+        self.assertAlmostEqual(suggestion.bits, -math.log2(0.8 * 0.9), places=9)
+        self.assertAlmostEqual(suggestion.next_token_bits, -math.log2(0.6), places=9)
+
+    def test_accept_greedy_is_one_undoable_action(self):
+        table = {
+            (): [0.8, 0.2],
+            (0,): [0.9, 0.1],
+            (0, 0): [0.6, 0.4],
+        }
+        nav = Navigator(TableCursor(table), choices=2)
+        suggestion = nav.accept_greedy(max_bits=1.0)
+        self.assertEqual(suggestion.tokens, (0, 0))
+        self.assertEqual(nav.state.cursor.prefix, (0, 0))
+        self.assertEqual(nav.undo_depth, 1)
+        self.assertTrue(nav.undo())
+        self.assertEqual(nav.state.cursor.prefix, ())
+        self.assertEqual(nav.state.lo, 0.0)
+        self.assertEqual(nav.state.hi, 1.0)
+
+    def test_choose_is_undoable(self):
+        nav = Navigator(RewindCursor(), choices=2)
+        nav.choose(1)
+        self.assertEqual(nav.state.actions, 1)
+        self.assertTrue(nav.undo())
         self.assertEqual(nav.state.actions, 0)
+        self.assertEqual(nav.state.cursor.prefix, ())
 
 
-class TreeExplorerTests(unittest.TestCase):
-    def test_background_worker_populates_and_survives_rebase(self):
-        cursor = RewindCursor()
-        nav = Navigator(cursor, choices=3, preview_tokens=2)
-        with TreeExplorer(nav, prefetch_depth=2, max_cached=16) as explorer:
-            self.assertTrue(explorer.wait_current(timeout=2.0))
-            previews = explorer.current_previews()
-            self.assertEqual(len(previews), 2)
-            self.assertTrue(all(preview is not None for preview in previews))
+class TokenTreeExplorerTests(unittest.TestCase):
+    def make_table(self):
+        return {
+            (): [0.8, 0.2],
+            (0,): [0.9, 0.1],
+            (1,): [0.5, 0.5],
+            (0, 0): [0.9, 0.1],
+            (0, 1): [0.5, 0.5],
+            (1, 0): [0.5, 0.5],
+            (1, 1): [0.5, 0.5],
+            (0, 0, 0): [0.5, 0.5],
+            (0, 0, 1): [0.5, 0.5],
+        }
 
-            explorer.choose(2)
-            self.assertEqual(explorer.snapshot.actions, 1)
-            self.assertTrue(explorer.wait_current(timeout=2.0))
-            self.assertTrue(all(p is not None for p in explorer.current_previews()))
-            self.assertAlmostEqual(explorer.supplied_nats, math.log(3), places=12)
+    def test_dijkstra_expands_lowest_surprisal_prefix_first(self):
+        nav = Navigator(TableCursor(self.make_table()), choices=2)
+        explorer = TokenTreeExplorer(nav, max_nodes=64, autostart=False)
 
-    def test_worker_errors_surface(self):
-        class BrokenCursor(RewindCursor):
-            def predict(self):
-                raise ValueError("boom")
+        self.assertTrue(explorer.step())
+        self.assertTrue(explorer.step())
+        self.assertTrue(explorer.step())
 
-        nav = Navigator(BrokenCursor(), choices=3)
-        with TreeExplorer(nav, prefetch_depth=1) as explorer:
-            with self.assertRaises(RuntimeError):
-                explorer.wait_current(timeout=2.0)
+        entries = explorer.tree_entries()
+        node0 = next(e for e in entries if e.path == (0,))
+        self.assertTrue(node0.expanded)
+        self.assertFalse(any(e.path == (1,) and e.expanded for e in entries))
+
+    def test_ellipsis_cost_is_residual_probability(self):
+        nav = Navigator(TableCursor(self.make_table()), choices=2)
+        explorer = TokenTreeExplorer(nav, max_nodes=64, autostart=False)
+        explorer.step()
+        explorer.step()
+
+        root_ellipsis = next(
+            e for e in explorer.tree_entries() if e.is_ellipsis and e.depth == 0
+        )
+        self.assertEqual(root_ellipsis.hidden_count, 1)
+        self.assertAlmostEqual(root_ellipsis.hidden_nats, -math.log(0.2), places=12)
+
+    def test_no_depth_limit_only_node_cap(self):
+        nav = Navigator(RewindCursor(), choices=2)
+        explorer = TokenTreeExplorer(nav, max_nodes=12, autostart=False)
+        for _ in range(200):
+            if not explorer.step():
+                break
+        stats = explorer.stats()
+        self.assertLessEqual(stats.nodes, 12)
+        self.assertTrue(stats.saturated or stats.nodes == 12)
+
+    def test_binary_narrowing_retargets_active_tree_without_requiring_token_commit(self):
+        table = {
+            (): [0.4, 0.35, 0.25],
+            (1,): [0.5, 0.5, 0.0],
+            (2,): [0.5, 0.5, 0.0],
+        }
+        nav = Navigator(TableCursor(table), choices=2)
+        explorer = TokenTreeExplorer(nav, max_nodes=64, autostart=False)
+        explorer.step()
+        explorer.step()
+        explorer.choose(1)
+        self.assertEqual(explorer.snapshot.actions, 1)
+        self.assertEqual(explorer.snapshot.prefix, ())
+        self.assertAlmostEqual(explorer.snapshot.lo, 0.5)
+        self.assertAlmostEqual(explorer.snapshot.hi, 1.0)
+
+    def test_explorer_accept_and_undo_reroot(self):
+        nav = Navigator(RewindCursor(), choices=2)
+        explorer = TokenTreeExplorer(nav, max_nodes=32, autostart=False)
+        suggestion = explorer.accept_greedy(max_bits=2.0, max_tokens=3)
+        self.assertTrue(suggestion.tokens)
+        self.assertEqual(explorer.snapshot.prefix, suggestion.tokens)
+        self.assertTrue(explorer.undo())
+        self.assertEqual(explorer.snapshot.prefix, ())
 
 
 if __name__ == "__main__":

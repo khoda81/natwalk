@@ -1,7 +1,9 @@
-"""MuScriptor demo backend for natwalk.
+"""Interactive MuScriptor demo for natwalk.
 
-The adapter uses MuScriptor private APIs because natwalk needs the complete
-next-token distribution and direct access to its streaming model state.
+The model tree is searched in information distance (Dijkstra / uniform-cost
+search). Tree browsing never commits probability mass. Binary/K-ary digits
+narrow the exact arithmetic interval; Space explicitly accepts a model-greedy
+continuation up to an adjustable bit budget.
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ from __future__ import annotations
 import argparse
 import copy
 import select
+import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -19,7 +22,7 @@ import torch.nn.functional as F
 from muscriptor import TranscriptionModel
 from muscriptor.modules.streaming import increment_steps, init_states
 
-from natwalk import Navigator, TreeExplorer
+from natwalk import GreedySuggestion, Navigator, TokenTreeExplorer, TreeEntry
 
 VALID_CARD = 1393
 SAMPLE_RATE = 16_000
@@ -113,9 +116,9 @@ class MuscriptorContext:
         if kind in {"PAD", "EOS", "UNK"}:
             return kind
         if kind == "shift":
-            return f"shift({value / self.tokenizer.frame_rate:.2f}s)"
+            return f"t={value / self.tokenizer.frame_rate:.2f}s"
         if kind == "pitch":
-            return f"pitch({midi_name(value)})"
+            return midi_name(value)
         if kind == "velocity":
             return "note_on" if value else "note_off"
         if kind == "tie":
@@ -146,7 +149,7 @@ class MuscriptorCursor:
         self._probs: torch.Tensor | None = None
 
     def clone(self) -> MuscriptorCursor:
-        """Full KV clone fallback; natwalk previews prefer checkpoint/restore."""
+        """Full KV clone fallback; natwalk normally uses checkpoint/restore."""
         self.predict()
         other = object.__new__(MuscriptorCursor)
         other.ctx = self.ctx
@@ -229,12 +232,13 @@ class MuscriptorCursor:
         self._probs = None
 
 
-def fmt_tokens(ctx: MuscriptorContext, tokens: Sequence[int], limit: int = 8) -> str:
+def fmt_tokens(ctx: MuscriptorContext, tokens: Sequence[int], limit: int = 16) -> str:
     if not tokens:
         return "∅"
-    shown = [ctx.describe(token) for token in tokens[:limit]]
     if len(tokens) > limit:
-        shown.append("…")
+        shown = ["…", *(ctx.describe(token) for token in tokens[-limit:])]
+    else:
+        shown = [ctx.describe(token) for token in tokens]
     return " · ".join(shown)
 
 
@@ -243,56 +247,184 @@ def clear() -> None:
         print("\033[2J\033[H", end="")
 
 
-def print_screen(explorer: TreeExplorer, ctx: MuscriptorContext) -> None:
+def bold(text: str) -> str:
+    if not sys.stdout.isatty():
+        return text
+    return f"\033[1m{text}\033[0m"
+
+
+def dim(text: str) -> str:
+    if not sys.stdout.isatty():
+        return text
+    return f"\033[2m{text}\033[0m"
+
+
+def collapse_entries(
+    entries: Sequence[TreeEntry],
+    collapsed: set[tuple[int, ...]],
+) -> list[TreeEntry]:
+    out: list[TreeEntry] = []
+    for entry in entries:
+        if any(
+            len(entry.path) > len(parent) and entry.path[: len(parent)] == parent
+            for parent in collapsed
+        ):
+            continue
+        out.append(entry)
+    return out
+
+
+def entry_key(entry: TreeEntry) -> tuple[tuple[int, ...], bool]:
+    return entry.path, entry.is_ellipsis
+
+
+def suggestion_prefixes(suggestion: GreedySuggestion) -> set[tuple[int, ...]]:
+    return {tuple(suggestion.tokens[:i]) for i in range(1, len(suggestion.tokens) + 1)}
+
+
+def render_tree_line(
+    entry: TreeEntry,
+    ctx: MuscriptorContext,
+    *,
+    selected: bool,
+    highlighted: bool,
+    collapsed: bool,
+    width: int,
+) -> str:
+    indent = "│  " * max(0, entry.depth)
+    marker = "▶ " if highlighted else "  "
+    select_marker = "❯ " if selected else "  "
+
+    if entry.is_ellipsis:
+        label = f"…  +{entry.hidden_count} hidden"
+        body = f"{indent}└─ {label}"
+    else:
+        branch = "▸" if collapsed else ("┬" if entry.expanded else "─")
+        label = ctx.describe(entry.token) if entry.token is not None else "."
+        body = f"{indent}├{branch} {label}"
+
+    suffix = f"{entry.hidden_nats if entry.is_ellipsis else entry.edge_nats:7.3f} nat"
+    room = max(1, width - len(select_marker) - len(marker) - len(suffix) - 1)
+    if len(body) > room:
+        body = body[: max(1, room - 1)] + "…"
+    line = f"{select_marker}{marker}{body:<{room}} {suffix}"
+    if selected or highlighted:
+        line = bold(line)
+    elif entry.is_ellipsis:
+        line = dim(line)
+    return line
+
+
+def render_screen(
+    explorer: TokenTreeExplorer,
+    ctx: MuscriptorContext,
+    *,
+    budget_bits: float,
+    selected_key: tuple[tuple[int, ...], bool] | None,
+    collapsed: set[tuple[int, ...]],
+    tree_lines: int,
+    debug: bool,
+) -> tuple[list[TreeEntry], tuple[tuple[int, ...], bool] | None]:
     clear()
     state = explorer.snapshot
     stats = explorer.stats()
+    suggestion = explorer.cached_greedy_suggestion(max_bits=budget_bits)
+    all_entries = collapse_entries(explorer.tree_entries(), collapsed)
+    highlights = suggestion_prefixes(suggestion)
 
-    print("MuScriptor information-space navigator")
-    print("=" * 78)
-    print(
-        f"K={explorer.choices}  |  exact cost/action = {explorer.nats_per_action:.6f} nat "
-        f"= {explorer.bits_per_action:.6f} bit"
-    )
-    print(
-        f"actions={state.actions}  supplied={explorer.supplied_nats:.4f} nat  |  "
-        f"committed path surprisal={state.path_surprisal:.4f} nat"
-    )
-    print(
-        f"unresolved local interval=[{state.lo:.9f}, {state.hi:.9f})  "
-        f"width={state.hi - state.lo:.6g}"
-    )
-    print(f"committed tokens={len(state.prefix)}")
-    if state.prefix:
-        print("tail:", fmt_tokens(ctx, state.prefix[-10:], limit=10))
-    print(
-        f"prefetch: cached={stats.cached} queued={stats.queued} "
-        f"expanded={stats.expanded}{'  ⟳' if stats.computing else ''}"
-    )
-    print()
-
-    if state.ended:
-        print("EOS is forced. Done.")
-        return
-
-    previews = explorer.current_previews()
-    for bucket, preview in enumerate(previews):
-        if preview is None:
-            print(f"[{bucket + 1}] ⟳        computing…")
-        elif preview.forced:
-            print(f"[{bucket + 1}] FORCES   {fmt_tokens(ctx, preview.forced)}")
-            if preview.representative:
-                print(f"    then ~ {fmt_tokens(ctx, preview.representative)}")
+    if selected_key is None and all_entries:
+        selected_key = entry_key(all_entries[0])
+    selected_index = 0
+    if selected_key is not None and all_entries:
+        for i, entry in enumerate(all_entries):
+            if entry_key(entry) == selected_key:
+                selected_index = i
+                break
         else:
-            print(f"[{bucket + 1}] preview  {fmt_tokens(ctx, preview.representative)}")
+            selected_key = entry_key(all_entries[0])
 
-    print(f"[{explorer.choices}] …        residual / none of the above")
+    print("natwalk · MuScriptor")
+    print("=" * 78)
+    print(f"Budget: {budget_bits:.2f} bit    binary action: {explorer.bits_per_action:.2f} bit")
     print()
-    print(f"1-{explorer.choices}: choose bucket   SPACE/ENTER: bucket 1   q: quit")
-    print("FORCES is exact; preview/~ is only a representative code point.")
+    print("Committed:")
+    print(fmt_tokens(ctx, state.prefix, limit=18))
+
+    if suggestion.tokens:
+        tail = " · …" if not suggestion.complete else ""
+        print()
+        print(
+            f"Suggestion [{suggestion.bits:.3f}/{budget_bits:.2f} bit]"
+            f"{'  ⟳' if not suggestion.complete else ''}:"
+        )
+        print(bold(fmt_tokens(ctx, suggestion.tokens, limit=18) + tail))
+    elif suggestion.complete and suggestion.next_token_bits is not None:
+        print()
+        print(
+            f"Suggestion: —   next greedy token costs {suggestion.next_token_bits:.3f} bit "
+            f"(budget {budget_bits:.2f})"
+        )
+    else:
+        print()
+        print("Suggestion: ⟳ computing…")
+
+    print()
+    status = (
+        f"tree: {stats.nodes} nodes · {stats.expanded} model expansions · "
+        f"{stats.frontier} frontier"
+        f"{' · ⟳' if stats.computing else ''}"
+        f"{' · memory cap' if stats.saturated else ''}"
+    )
+    print(status)
+
+    if debug:
+        print(
+            f"range=[{state.lo:.9f}, {state.hi:.9f}) · "
+            f"binary={explorer.supplied_bits:.3f} bit · "
+            f"path={state.path_surprisal:.3f} nat · undo={state.undo_depth}"
+        )
+
+    print()
+    width = max(60, shutil.get_terminal_size((100, 30)).columns)
+    if not all_entries:
+        print("  ⟳ expanding root…")
+    else:
+        line_count = max(4, tree_lines)
+        half = line_count // 2
+        start = max(0, selected_index - half)
+        start = min(start, max(0, len(all_entries) - line_count))
+        end = min(len(all_entries), start + line_count)
+
+        if start > 0:
+            print(dim(f"  ↑ … {start} rows above"))
+        for entry in all_entries[start:end]:
+            key = entry_key(entry)
+            print(
+                render_tree_line(
+                    entry,
+                    ctx,
+                    selected=key == selected_key,
+                    highlighted=(not entry.is_ellipsis and entry.path in highlights),
+                    collapsed=entry.path in collapsed,
+                    width=width,
+                )
+            )
+        if end < len(all_entries):
+            print(dim(f"  ↓ … {len(all_entries) - end} rows below"))
+
+    print()
+    if explorer.choices == 2:
+        print("0 / 1: choose exact half    Space: accept suggestion    Backspace: undo")
+    else:
+        print(f"0–{explorer.choices - 1}: choose exact bucket    Space: accept suggestion")
+    print("↑/↓ browse    ←/→ collapse/expand    [/]: budget    d: debug    q: quit")
+    if state.lo != 0.0 or state.hi != 1.0:
+        print(dim("Space is an explicit accept: it resets the currently narrowed arithmetic range."))
+
+    return all_entries, selected_key
 
 
-def read_key(timeout: float = 0.25) -> str | None:
+def read_key(timeout: float = 0.20) -> str | None:
     if not sys.stdin.isatty():
         return input("> ").strip()[:1]
 
@@ -309,7 +441,21 @@ def read_key(timeout: float = 0.25) -> str | None:
         ch = sys.stdin.read(1)
         if ch == "\x03":
             raise KeyboardInterrupt
-        return ch
+        if ch != "\x1b":
+            return ch
+
+        seq = ch
+        for _ in range(2):
+            ready, _, _ = select.select([sys.stdin], [], [], 0.01)
+            if not ready:
+                break
+            seq += sys.stdin.read(1)
+        return {
+            "\x1b[A": "UP",
+            "\x1b[B": "DOWN",
+            "\x1b[C": "RIGHT",
+            "\x1b[D": "LEFT",
+        }.get(seq, "ESC")
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -320,12 +466,23 @@ def main() -> None:
     ap.add_argument("--model", default="medium", choices=["small", "medium", "large"])
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--chunk", type=int, default=0, help="5-second chunk index")
-    ap.add_argument("--choices", type=int, default=5)
-    ap.add_argument("--preview-tokens", type=int, default=8)
+    ap.add_argument("--choices", type=int, default=2)
     ap.add_argument("--max-tokens", type=int, default=256)
-    ap.add_argument("--prefetch-depth", type=int, default=2)
-    ap.add_argument("--prefetch-cache", type=int, default=128)
+    ap.add_argument(
+        "--tree-nodes",
+        type=int,
+        default=10_000,
+        help="materialized token-tree node cap; 0 means unlimited",
+    )
+    ap.add_argument("--tree-lines", type=int, default=16)
+    ap.add_argument("--budget-bits", type=float, default=2.0)
+    ap.add_argument("--budget-step", type=float, default=0.5)
     args = ap.parse_args()
+
+    if args.budget_bits < 0:
+        ap.error("--budget-bits must be >= 0")
+    if args.budget_step <= 0:
+        ap.error("--budget-step must be > 0")
 
     print(f"Loading MuScriptor {args.model} on {args.device} …", file=sys.stderr)
     tm = TranscriptionModel.load_model(args.model, device=args.device)
@@ -335,16 +492,25 @@ def main() -> None:
         file=sys.stderr,
     )
     ctx = MuscriptorContext(tm, args.audio, chunk_index=args.chunk, max_tokens=args.max_tokens)
-    nav = Navigator(ctx.new_cursor(), choices=args.choices, preview_tokens=args.preview_tokens)
+    nav = Navigator(ctx.new_cursor(), choices=args.choices)
+
+    budget_bits = args.budget_bits
+    selected_key: tuple[tuple[int, ...], bool] | None = None
+    collapsed: set[tuple[int, ...]] = set()
+    debug = False
 
     try:
-        with TreeExplorer(
-            nav,
-            prefetch_depth=args.prefetch_depth,
-            max_cached=args.prefetch_cache,
-        ) as explorer:
+        with TokenTreeExplorer(nav, max_nodes=args.tree_nodes) as explorer:
             while True:
-                print_screen(explorer, ctx)
+                entries, selected_key = render_screen(
+                    explorer,
+                    ctx,
+                    budget_bits=budget_bits,
+                    selected_key=selected_key,
+                    collapsed=collapsed,
+                    tree_lines=args.tree_lines,
+                    debug=debug,
+                )
                 if explorer.snapshot.ended:
                     break
 
@@ -353,22 +519,70 @@ def main() -> None:
                     continue
                 if key.lower() == "q":
                     break
-                if key in (" ", "\r", "\n"):
-                    bucket = 0
-                elif key.isdigit() and 1 <= int(key) <= explorer.choices:
-                    bucket = int(key) - 1
-                else:
+                if key.lower() == "d":
+                    debug = not debug
                     continue
-                explorer.choose(bucket)
+
+                if key == "[":
+                    budget_bits = max(0.0, budget_bits - args.budget_step)
+                    continue
+                if key == "]":
+                    budget_bits += args.budget_step
+                    continue
+
+                if key in ("\x7f", "\b"):
+                    if explorer.undo():
+                        selected_key = None
+                        collapsed.clear()
+                    continue
+
+                if key in (" ", "\r", "\n"):
+                    explorer.accept_greedy(max_bits=budget_bits, max_tokens=args.max_tokens)
+                    selected_key = None
+                    collapsed.clear()
+                    continue
+
+                if key.isdigit():
+                    bucket = int(key)
+                    if 0 <= bucket < explorer.choices:
+                        explorer.choose(bucket)
+                        selected_key = None
+                        collapsed.clear()
+                    continue
+
+                if not entries:
+                    continue
+
+                try:
+                    index = next(
+                        i for i, entry in enumerate(entries) if entry_key(entry) == selected_key
+                    )
+                except StopIteration:
+                    index = 0
+
+                if key == "UP":
+                    index = max(0, index - 1)
+                    selected_key = entry_key(entries[index])
+                elif key == "DOWN":
+                    index = min(len(entries) - 1, index + 1)
+                    selected_key = entry_key(entries[index])
+                elif key in {"LEFT", "RIGHT"}:
+                    entry = entries[index]
+                    if entry.is_ellipsis:
+                        continue
+                    if key == "LEFT":
+                        collapsed.add(entry.path)
+                    else:
+                        collapsed.discard(entry.path)
+
     except KeyboardInterrupt:
         pass
     finally:
-        state = nav.state
+        state = nav.snapshot()
         print()
         print(
-            f"final: actions={state.actions}, supplied={nav.supplied_nats:.6f} nat "
-            f"({nav.supplied_bits:.6f} bit), committed_tokens={len(state.cursor.prefix)}, "
-            f"path_surprisal={state.path_surprisal:.6f} nat"
+            f"final: binary_actions={state.actions}, binary={nav.supplied_bits:.6f} bit, "
+            f"committed_tokens={len(state.prefix)}, path_surprisal={state.path_surprisal:.6f} nat"
         )
 
 

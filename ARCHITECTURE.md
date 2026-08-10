@@ -1,158 +1,93 @@
 # Architecture
 
-## 1. Exact navigator
+## Exact layer
 
-The semantic state is deliberately small:
+`Navigator` is the source of truth. It owns:
 
 ```text
-causal model cursor
+causal cursor
 arithmetic interval [lo, hi)
-action count
+equal-information action count
 committed-path surprisal
+undo history
 ```
 
-A user action narrows `[lo, hi)` by an exact factor of `K`. Tokens are committed only while that whole interval lies inside one model child interval.
+A K-way action narrows the arithmetic interval by exactly `1/K`. Tokens are committed only when the entire selected interval lies in one token cell.
 
-The backend owns tokenization, model state, and the complete next-token probability vector.
+Explicit greedy autocomplete is separate from arithmetic navigation: it commits a model-greedy path up to a bit budget and resets the unresolved interval.
 
-## 2. Branching API
+## Search layer
 
-The minimal backend API is:
+`TokenTreeExplorer` is a cache/search engine over the model's token-prefix tree.
 
-```python
-predict() -> complete distribution
-observe(token)
-clone()
-```
-
-For models with large KV caches, `clone()` is semantically convenient and often operationally terrible. Backends can additionally expose:
-
-```python
-checkpoint() -> opaque small state
-restore(checkpoint)
-```
-
-`Navigator` prefers checkpoint/restore whenever available.
-
-A preallocated append-only transformer cache is particularly friendly to this: a speculative branch writes only after the current offsets. Rewinding those offsets makes the suffix invisible again, so the next branch can overwrite it without copying the immutable prefix.
-
-## 3. Background tree explorer
-
-`TreeExplorer` owns a single background inference thread around an exact `Navigator`.
-
-It precomputes previews for future **action paths** such as:
+For token edge probability `p`:
 
 ```text
-(0,)
-(1,)
-...
-(4, 0)
-(4, 1)
-...
+edge cost = -ln(p)
+path cost = sum(edge costs) = -ln P(prefix)
 ```
 
-A path means “apply all earlier bucket choices exactly, then preview the final bucket.” This is useful because a cached path `(a, b)` becomes the immediately useful preview `(b,)` if the user chooses `a`.
+The worker uses a global min-heap and expands the lowest information-cost prefix first: uniform-cost search / Dijkstra.
 
-For a `K`-ary interaction, every action region at depth `d` has exact mass
+This is intentionally different from the first prototype, which prefetched the equal-mass *interaction tree* by action depth.
 
-$$
-K^{-d}.
-$$
+### Lazy sibling streams
 
-So probability-mass-first scheduling over action regions is simply shallow-first. Equal-mass paths are tie-broken lexicographically, which explores modeward buckets before the residual bucket.
+A model prediction gives the whole vocabulary distribution at once, sorted by probability.
 
-Only paths ending in visible buckets need a rendered preview. Residual buckets still appear inside path prefixes so their descendants are prefetched.
+Putting all vocabulary children onto the heap is exact but wasteful. Instead, each expanded parent contributes only its cheapest unseen child to the heap. When that child is popped, the next sibling is queued.
 
-## 4. Selection, pruning, and rebasing
+This is a k-way merge of sorted child streams and produces the same Dijkstra order while keeping the frontier compact.
 
-Suppose the cache contains:
+### Hidden residual
+
+Unmaterialized children are retained as exact aggregate mass:
 
 ```text
-(0,)      preview A
-(1,)      preview B
-(0, 0)    preview AA
-(0, 1)    preview AB
-(1, 0)    preview BA
-...
+hidden_mass = sum(probability of hidden relevant children)
+ellipsis_cost = -ln(hidden_mass)
 ```
 
-If the user selects bucket `0`:
+Rendering may show only a viewport of the discovered tree; search completeness and render completeness are separate concerns.
 
-1. The exact navigator commits that equal-information action.
-2. The generation epoch increments.
-3. Every cached path not beginning with `0` is discarded.
-4. Descendant paths are rebased:
+## Current-root KV safety
+
+The MuScriptor backend uses a preallocated append-only KV cache. Its cheap checkpoint stores only logical state and streaming offsets.
+
+Speculation is safe only when it starts from the **current committed root**: speculative writes then occur strictly after the live prefix and can be discarded by restoring offsets.
+
+Searching from an older ancestor while a newer live prefix exists could overwrite KV slots needed by that live prefix. Therefore when a user action commits new tokens (or undo moves the root), the active search is re-rooted.
+
+Persistent tree metadata across roots can be added later with persistent/copy-on-write KV pages or replay from independent branch state, but live-state correctness takes priority.
+
+## Undo
+
+For rewindable backends, each user action stores a lightweight cursor checkpoint plus arithmetic state. Older checkpoints remain valid because later search only writes after the then-current prefix.
+
+Undo restores the previous checkpoint and re-roots Dijkstra search there.
+
+## Resource growth
+
+There is no semantic depth limit.
+
+The current implementation limits *materialized tree nodes* with `max_nodes`. Expanded nodes retain their ranked distributions so hidden residuals and lazy siblings remain exact.
+
+Future memory strategies:
+
+1. compact ranked distributions,
+2. eviction/reconstruction of cold expanded nodes,
+3. CPU-offloaded branch metadata,
+4. batched replay,
+5. persistent/copy-on-write KV pages.
+
+## UI separation
+
+The UI deliberately separates three things:
 
 ```text
-(0, 0) -> (0,)
-(0, 1) -> (1,)
+tree browsing      -> inspection only; no probability commitment
+0/1 (or K digits) -> exact equal-information arithmetic navigation
+Space              -> explicit greedy continuation under a bit budget
 ```
 
-5. Stale in-flight work from the old epoch is ignored when it completes.
-6. Missing descendants are scheduled under the new root.
-
-The worker never decides semantics. Its previews are disposable caches; the arithmetic interval is always authoritative.
-
-## 5. Concurrency model
-
-Model inference and live `choose()` calls share one compute lock. This intentionally serializes accelerator access for stateful backends.
-
-The worker may temporarily walk and rewind the real cursor, so the UI must not inspect that mutable cursor directly while inference is happening. `TreeExplorer` therefore publishes an immutable `NavigationSnapshot` containing only:
-
-```text
-committed prefix
-ended flag
-[lo, hi)
-action count
-path surprisal
-```
-
-The UI can repaint from the snapshot and cached previews without touching speculative model state.
-
-## 6. MuScriptor backend
-
-MuScriptor's streaming transformer preallocates KV tensors and controls visible history using offsets. The natwalk example checkpoints:
-
-```text
-prefix / ended
-current input token
-first-step flag
-cached probability vector
-streaming offset/control state
-```
-
-It deliberately does **not** copy tensors named `cache`.
-
-Before a checkpoint, `predict()` ensures the current conditioning/input has been written into KV. A speculative branch then advances offsets and writes later slots. Restoring the saved offsets hides that suffix; the next branch overwrites it.
-
-This replaces repeated large KV tensor clones with tiny control-state copies.
-
-## 7. Memory strategy
-
-The current explorer caches preview metadata, not one full backend cursor per tree node. That keeps the generic tree cheap and avoids turning speculative depth into VRAM growth.
-
-More advanced backends can later add:
-
-```text
-persistent / paged KV
-batched branch prediction
-CPU-offloaded checkpoints
-parent + suffix replay
-fork_many(tokens)
-```
-
-Those are performance extensions only. They must preserve the exact same complete distribution and causal semantics.
-
-## 8. UI rendering
-
-Raw model tokens are still only a debugging representation. Presentation should remain separate:
-
-```text
-model token path
-    ↓
-domain event decoder
-    ↓
-renderable continuation
-```
-
-For MuScriptor, the next useful layer is a compact piano-roll/staff-like rendering of each preview while retaining the exact arithmetic interval behind the option.
+This prevents a visual "move to sibling" from pretending to cost one bit when the sibling may actually carry very different surprisal.

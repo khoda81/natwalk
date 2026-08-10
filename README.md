@@ -1,80 +1,88 @@
 # natwalk
 
-**Navigate autoregressive distributions in fixed-information steps.**
+**Navigate autoregressive distributions in information space.**
 
-`natwalk` is an interaction primitive for generative models where the unit of progress is **information**, not tokens, characters, seconds, or pixels.
+`natwalk` is an interaction primitive for generative models where progress is measured in **nats/bits**, not tokens, characters, seconds, or pixels.
 
-Given a complete autoregressive distribution and `K` visible choices, each action selects one of `K` equal-width arithmetic-code intervals. Every action therefore contributes exactly
+A backend exposes the complete next-token distribution and a causal cursor. natwalk can then:
+
+- narrow the distribution by exact equal-information arithmetic-code actions,
+- search the model's token tree with Dijkstra / uniform-cost search in surprisal,
+- expose hidden residual probability as an exact `…` branch,
+- accept a greedy continuation up to a fixed information budget,
+- undo user actions without changing the probability semantics.
+
+No top-k or top-p truncation is part of the core.
+
+## Exact arithmetic navigation
+
+With `K` choices, one user action selects one of `K` equal-width subintervals of the current arithmetic-code interval and therefore supplies exactly
 
 $$
 \ln K \text{ nats} = \log_2 K \text{ bits}.
 $$
 
-For the default `K = 5`, one action is exactly `ln(5) = 1.609438` nats (`2.321928` bits).
+For binary navigation (`K = 2`), every `0`/`1` action is exactly one bit.
 
-A confident model can commit a long continuation after one action. An uncertain model may need several actions before even the next token is determined. **Length adapts to surprisal.**
+If the selected interval lies completely inside one model token interval, that token is forced and committed. The interval is renormalized inside that token and the process repeats.
 
-## The UI idea
+## Token-tree search
 
-At each step, natwalk lays out the model's *entire* next-token distribution in descending probability order and partitions the currently unresolved arithmetic interval into equal-cost buckets:
+The model tree uses token surprisal as edge cost:
 
-```text
-[1] high-probability continuation
-[2] another continuation
-[3] another continuation
-[4] another continuation
-[5] …   residual / none of the above
+$$
+c(y_t) = -\ln p(y_t \mid y_{<t}).
+$$
+
+Therefore a prefix has cumulative cost
+
+$$
+g(y_{1:n}) = -\ln P(y_{1:n}).
+$$
+
+`TokenTreeExplorer` expands the smallest cumulative cost first: **Dijkstra in information distance**, not BFS by token depth and not beam search.
+
+One model call exposes the complete ranked distribution at a prefix. Children are materialized lazily. Only the cheapest unseen sibling of each expanded parent needs to sit on the global heap; when it is popped, the next sibling is exposed. This is equivalent to inserting the whole vocabulary into the heap without the vocabulary-sized frontier blow-up.
+
+There is no search depth limit. `max_nodes` is only a resource cap.
+
+### Exact ellipsis
+
+If some children are not materialized/displayed, `…` represents their aggregate probability mass:
+
+$$
+p_{\ldots} = \sum_{i \in \text{hidden}} p_i,
+\qquad
+c_{\ldots} = -\ln p_{\ldots}.
+$$
+
+So the ellipsis is a real probability region, not UI hand-waving.
+
+## Budgeted greedy autocomplete
+
+Space can accept the longest greedy continuation whose cumulative surprisal fits a budget `B`:
+
+$$
+\sum_t -\log_2 p(y_t \mid y_{<t}) \le B.
+$$
+
+A confident model may fit many tokens into two bits. An uncertain model may fit none.
+
+```python
+from natwalk import Navigator
+
+nav = Navigator(cursor, choices=2)
+
+suggestion = nav.greedy_suggestion(max_bits=2.0)
+accepted = nav.accept_greedy(max_bits=2.0)
+nav.undo()
 ```
 
-The last bucket is not top-k truncation. It is an exact equal-mass residual interval. Selecting `…` zooms into that region and repartitions it again.
-
-There are two kinds of displayed continuation:
-
-- **FORCES** — every code point in the selected interval agrees on these tokens, so they are safe to commit.
-- **preview** — one representative arithmetic-code point from the bucket, useful for display but never silently treated as the whole bucket.
-
-This distinction keeps navigation complete: no probability mass is thrown away for UI convenience.
-
-## Core invariant
-
-Let the unresolved arithmetic interval be `[l, h)` and let the user choose bucket `j` out of `K`. The new interval is
-
-$$
-\left[
- l + \frac{j}{K}(h-l),
- l + \frac{j+1}{K}(h-l)
-\right).
-$$
-
-If that whole interval lies inside one model token's arithmetic interval `[a, a+p)`, that token is forced. Commit it and renormalize:
-
-$$
-[l,h) \leftarrow
-\left[
-\frac{l-a}{p},
-\frac{h-a}{p}
-\right).
-$$
-
-Repeat until the unresolved interval straddles multiple next-token cells.
-
-The committed model path has surprisal
-
-$$
--\sum_t \ln p(y_t \mid y_{<t}, x),
-$$
-
-while the information supplied by the user is exactly
-
-$$
-N_{actions}\ln K.
-$$
-
-Those are close but not identical in finite discrete trees because base-`K` bucket boundaries need not align with model-token interval boundaries—the usual arithmetic-coding alignment overhead.
+Greedy acceptance is an explicit autocomplete action. It resets any partially narrowed arithmetic interval to `[0, 1)`.
 
 ## Backend API
 
-The core is model-agnostic. A backend only needs a clonable causal cursor:
+The minimal backend is:
 
 ```python
 class Cursor:
@@ -82,62 +90,27 @@ class Cursor:
     ended: bool
 
     def predict(self) -> Sequence[float]:
-        """The COMPLETE next-token distribution."""
+        """Return the COMPLETE normalized next-token distribution."""
 
     def observe(self, token: int) -> None:
-        """Commit one symbol and advance model state."""
+        """Commit one token and advance causal state."""
 
     def clone(self) -> "Cursor":
-        """Fork the causal state for another walker."""
+        """Fork the causal state."""
 ```
 
-Then:
-
-```python
-from natwalk import Navigator
-
-nav = Navigator(cursor, choices=5)
-preview = nav.preview(0)  # does not mutate state
-forced = nav.choose(0)  # exactly ln(5) nats of user information
-```
-
-`predict()` must expose the **complete normalized distribution**. natwalk deliberately has no top-k or top-p approximation in its core semantics.
-
-### Cheap speculative rewind
-
-Cloning a transformer's full KV cache for every preview is often absurdly expensive. Backends may additionally implement:
+Large transformer backends should usually also implement:
 
 ```python
 def checkpoint(self) -> object: ...
 def restore(self, checkpoint: object) -> None: ...
 ```
 
-`Navigator` detects this capability automatically and explores previews in-place. A backend with a preallocated append-only KV cache can often checkpoint only offsets and logical metadata, then rewind those offsets and overwrite speculative suffix slots.
-
-## Background tree explorer
-
-`TreeExplorer` moves speculative preview generation off the interaction path:
-
-```python
-from natwalk import Navigator, TreeExplorer
-
-nav = Navigator(cursor, choices=5)
-
-with TreeExplorer(nav, prefetch_depth=2) as explorer:
-    explorer.wait_current()
-    options = explorer.current_previews()
-    explorer.choose(0)
-```
-
-The worker precomputes future action paths and caches their previews. At action depth `d`, every region has exactly probability mass `K^-d`, so it expands shallow regions first; equal-mass regions are tie-broken modeward. When the user chooses bucket `j`, cached paths not beginning with `j` are discarded and descendants of `j` are rebased to the new root.
-
-The exact `Navigator` remains the source of truth. Worker results are only caches.
+natwalk then speculates by rewinding lightweight cursor controls rather than cloning bulk KV tensors.
 
 ## MuScriptor demo
 
-The first backend is [MuScriptor](https://github.com/muscriptor/muscriptor), using its full 1,393-symbol transcription distribution and streaming KV state.
-
-The adapter implements cheap checkpoint/restore by rewinding MuScriptor's streaming offsets rather than cloning its bulk KV tensors. The CLI continuously repaints while one background inference worker fills the current menu and likely descendants.
+The first live backend is [MuScriptor](https://github.com/muscriptor/muscriptor), using its complete 1,393-symbol transcription distribution.
 
 With sibling checkouts at `~/Projects/muscriptor` and `~/Projects/natwalk`:
 
@@ -149,31 +122,56 @@ uv run \
   "samples/Laura Marling - What He Wrote.mp3" \
   --model medium \
   --device cuda \
-  --chunk 0 \
-  --prefetch-depth 2
+  --chunk 0
 ```
 
-The demo currently navigates one 5-second chunk. Chunk 0 matches MuScriptor's normal start-of-stream conditioning. Cross-chunk tie/prelude state is not wired into natwalk yet.
+The CLI defaults to binary navigation and a 2-bit Space suggestion:
 
-> The adapter currently uses MuScriptor private APIs (`_compute_logits`, `_build_conditions`, streaming model state) because the public transcription API does not expose the complete distribution or a rewindable cursor.
+```text
+Budget: 2.00 bit    binary action: 1.00 bit
+
+Committed:
+tie · t=0.23s · program(acoustic_guitar) · note_on
+
+Suggestion [1.87/2.00 bit]:
+A2 · t=0.45s · note_off · A2 · note_on · E3
+
+tree: 84 nodes · 31 model expansions · 12 frontier · ⟳
+
+  ▶ ├┬ A2                              0.09 nat
+  │  ├┬ t=0.45s                        0.13 nat
+  │  │  ├┬ note_off                    0.18 nat
+  │  │  │  └─ …  +1389 hidden          0.12 nat
+  ├─ E3                                1.31 nat
+  ├─ program(clean_electric_guitar)    1.72 nat
+  └─ …  +1388 hidden                   2.04 nat
+```
+
+Controls:
+
+```text
+0 / 1       choose an exact binary arithmetic half
+Space       accept the highlighted greedy suggestion
+Backspace   undo the previous user action
+[ / ]       decrease / increase suggestion budget
+↑ / ↓       browse the rendered tree
+← / →       collapse / expand a rendered subtree
+d           toggle debug interval/cost details
+q           quit
+```
+
+MuScriptor `shift` tokens are rendered as `t=...s`: they are absolute 100 Hz positions inside the current 5-second chunk, not time deltas.
+
+The demo currently operates on one 5-second MuScriptor chunk. Cross-chunk tie/prelude state is not wired into natwalk yet.
 
 ## Why `natwalk`?
 
-Ordinary autocomplete asks: *how many tokens should I suggest?*
+Ordinary autocomplete asks:
 
-natwalk asks: *how much information should one action specify?*
+> how many tokens should I suggest?
 
-That makes the same interaction meaningful for text, code, music transcription, speech, image tokens, or any other causal probabilistic model.
+natwalk asks:
 
-## Current status
+> how much information should this interaction specify?
 
-Early prototype, but the core pieces are live:
-
-- exact fixed-information navigation,
-- complete residual buckets,
-- forced-vs-representative semantics,
-- rewindable speculative cursors,
-- background tree prefetch + prune/rebase,
-- MuScriptor CLI demo.
-
-Next UI target: render musical continuations as notes/piano-roll fragments instead of raw model tokens.
+That same primitive can apply to text, code, music, speech, image tokens, or any other causal probabilistic model.
