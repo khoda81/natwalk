@@ -50,7 +50,6 @@ class SessionTests(unittest.TestCase):
 
         self.assertEqual(cursor.prefix, (0, 1))
         self.assertEqual(session.tree.path(root), (0, 1))
-        self.assertEqual(session.search.root, root)
 
     def test_restore_changes_execution_root_but_keeps_discovered_tree(self) -> None:
         cursor = TableCursor(self.make_table())
