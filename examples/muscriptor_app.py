@@ -32,6 +32,32 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 import muscriptor_cli_compact as compact  # noqa: E402
 
 
+# In the focused tree, an ellipsis is a probability region, not a pagination
+# affordance. Its position in the tree plus the exact nat cost already says
+# what matters; counts and "deviations along N steps" were visually noisy.
+_normal_ellipsis = compact._normal_ellipsis
+_deviation_ellipsis = compact._deviation_ellipsis
+
+
+def _bare_normal_ellipsis(entry: compact.cli.TreeEntry) -> compact._CompactNode:
+    node = _normal_ellipsis(entry)
+    node.label = "…"
+    return node
+
+
+def _bare_deviation_ellipsis(
+    sources: list[tuple[compact.cli.TreeEntry, compact.cli.TreeEntry]],
+) -> compact._CompactNode | None:
+    node = _deviation_ellipsis(sources)
+    if node is not None:
+        node.label = "…"
+    return node
+
+
+compact._normal_ellipsis = _bare_normal_ellipsis
+compact._deviation_ellipsis = _bare_deviation_ellipsis
+
+
 @contextlib.contextmanager
 def terminal_session() -> Iterator[None]:
     """Use a full-screen raw terminal session and restore it unconditionally."""
