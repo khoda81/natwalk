@@ -29,7 +29,7 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 # The examples directory is already on sys.path when this file is executed.
 # Importing the compact module installs its render_screen override on the main
 # MuScriptor example, then we invoke that example's normal CLI entry point.
-import muscriptor_cli_compact as compact  # noqa: E402
+import muscriptor_cli_compact as compact  # noqa: E402, I001
 
 
 # In the focused tree, an ellipsis is a probability region, not a pagination
