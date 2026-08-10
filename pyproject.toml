@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "natwalk"
+version = "0.1.0"
+description = "Navigate autoregressive distributions in fixed-information steps"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Mahdi Khodabandeh" }]
+keywords = ["information-theory", "arithmetic-coding", "autoregressive", "autocomplete"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/natwalk"]
+
+[tool.ruff]
+line-length = 100
