@@ -12,7 +12,6 @@ import torch
 import torch.nn.functional as F
 from muscriptor import TranscriptionModel
 from muscriptor.modules.streaming import increment_steps, init_states
-
 from tui import run_tui
 
 VALID_CARD = 1393
@@ -36,7 +35,9 @@ def snapshot_control_state(
         for key, value in state.items():
             if key == "cache":
                 continue
-            controls[key] = value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
+            controls[key] = (
+                value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
+            )
         out[module_name] = controls
     return out
 
