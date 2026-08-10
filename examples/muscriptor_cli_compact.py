@@ -48,7 +48,7 @@ def _deviation_ellipsis(
 ) -> _CompactNode | None:
     """Merge unexpanded alternatives skipped by one compressed corridor.
 
-    Each pair is ``(ellipsis_at_parent, chosen_child)``.  Conditioned on having
+    Each pair is ``(ellipsis_at_parent, chosen_child)``. Conditioned on having
     entered the first corridor token, the aggregate deviation mass is the sum
     of each hidden residual weighted by the probability of surviving the
     earlier corridor edges.
@@ -115,9 +115,12 @@ def _compact_tree(
             corridor.append(child)
             current = child
 
+        label = " · ".join(
+            ctx.describe(entry.token) for entry in corridor if entry.token is not None
+        )
         node = _CompactNode(
             representative=start,
-            label=" · ".join(ctx.describe(entry.token) for entry in corridor if entry.token is not None),
+            label=label,
             cost_nats=sum(max(0.0, entry.edge_nats) for entry in corridor),
             highlighted=highlighted,
             is_ellipsis=False,
