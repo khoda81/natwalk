@@ -60,7 +60,7 @@ compact._deviation_ellipsis = _bare_deviation_ellipsis
 
 @contextlib.contextmanager
 def terminal_session() -> Iterator[None]:
-    """Use a full-screen raw terminal session and restore it unconditionally."""
+    """Use a full-screen cbreak terminal session and restore it unconditionally."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         yield
         return
@@ -69,11 +69,12 @@ def terminal_session() -> Iterator[None]:
     old = termios.tcgetattr(fd)
 
     # 1049: save cursor + enter alternate screen. 25: hide cursor while the
-    # full-screen app is active. Keep stdin raw for the entire session so no
-    # key can arrive in the tiny canonical/echo window between UI refreshes.
+    # full-screen app is active. Keep stdin in cbreak mode for the entire
+    # session so keys are immediate and never echoed, while preserving output
+    # processing (notably NL -> CRLF) so every printed line returns to column 0.
     sys.stdout.write("\033[?1049h\033[H\033[?25l")
     sys.stdout.flush()
-    tty.setraw(fd)
+    tty.setcbreak(fd)
     try:
         yield
     finally:
