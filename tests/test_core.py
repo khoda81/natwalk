@@ -3,7 +3,12 @@ from __future__ import annotations
 import math
 import unittest
 
-from natwalk import Navigator, TokenTreeExplorer
+from natwalk import (
+    Navigator,
+    TokenTreeExplorer,
+    accept_completion,
+    cached_budget_completions,
+)
 
 
 class TableCursor:
@@ -218,6 +223,44 @@ class TokenTreeExplorerTests(unittest.TestCase):
         suggestion = explorer.accept_greedy(max_bits=2.0, max_tokens=3)
         self.assertTrue(suggestion.tokens)
         self.assertEqual(explorer.snapshot.prefix, suggestion.tokens)
+        self.assertTrue(explorer.undo())
+        self.assertEqual(explorer.snapshot.prefix, ())
+
+    def test_cached_budget_completions_follow_rendered_lexicographic_order(self):
+        table = {
+            (): [0.6, 0.4, 0.0],
+            (0,): [0.55, 0.45, 0.0],
+            (1,): [0.7, 0.3, 0.0],
+            (0, 0): [0.0, 0.0, 1.0],
+            (0, 1): [0.0, 0.0, 1.0],
+            (1, 0): [0.0, 0.0, 1.0],
+            (1, 1): [0.0, 0.0, 1.0],
+        }
+        nav = Navigator(TableCursor(table, eos=2), choices=2)
+        explorer = TokenTreeExplorer(nav, max_nodes=32, autostart=False)
+        for _ in range(100):
+            if not explorer.step():
+                break
+
+        suggestions = cached_budget_completions(
+            explorer,
+            max_nats=3.0,
+            max_tokens=2,
+        )
+        paths = [suggestion.tokens for suggestion in suggestions]
+        self.assertEqual(paths[:4], [(0, 0), (0, 1), (1, 0), (1, 1)])
+
+    def test_accept_cached_completion_is_undoable(self):
+        table = {
+            (): [0.6, 0.4, 0.0],
+            (0,): [0.55, 0.45, 0.0],
+            (1,): [0.7, 0.3, 0.0],
+        }
+        nav = Navigator(TableCursor(table), choices=2)
+        explorer = TokenTreeExplorer(nav, max_nodes=8, autostart=False)
+        accepted = accept_completion(explorer, (1, 0))
+        self.assertEqual(accepted.tokens, (1, 0))
+        self.assertEqual(explorer.snapshot.prefix, (1, 0))
         self.assertTrue(explorer.undo())
         self.assertEqual(explorer.snapshot.prefix, ())
 
