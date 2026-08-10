@@ -4,13 +4,29 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   core:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Sync
+        run: uv sync --locked
+
+      - name: Lint
+        run: uvx ruff check .
+
+      - name: Format
+        run: uvx ruff format --check .
+
       - name: Test
         run: uv run python -m unittest discover -s tests -v
-      - name: Compile
-        run: uv run python -m compileall -q src examples
+
+      - name: Build
+        run: uv build
