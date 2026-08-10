@@ -59,9 +59,7 @@ def main() -> None:
                 break
             name = _NAMES.get(data, "unknown")
             hex_bytes = " ".join(f"{byte:02x}" for byte in data)
-            sys.stdout.write(
-                f"{name:<14} bytes=[{hex_bytes}] repr={data!r}\r\n"
-            )
+            sys.stdout.write(f"{name:<14} bytes=[{hex_bytes}] repr={data!r}\r\n")
             sys.stdout.flush()
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
