@@ -2,7 +2,7 @@
 
 ## 1. Exact navigator
 
-The core owns only four semantic pieces of state:
+The semantic state is deliberately small:
 
 ```text
 causal model cursor
@@ -13,68 +13,139 @@ committed-path surprisal
 
 A user action narrows `[lo, hi)` by an exact factor of `K`. Tokens are committed only while that whole interval lies inside one model child interval.
 
-The model backend owns tokenization, model state, and the complete next-token probability vector.
+The backend owns tokenization, model state, and the complete next-token probability vector.
 
-## 2. Why preview generation is currently slow
+## 2. Branching API
 
-A visible menu needs several representative continuations. Each representative is a separate walker through the autoregressive tree, which means repeated model inference and branching KV state.
+The minimal backend API is:
 
-Generating all visible walkers synchronously puts model latency directly on the interaction path. That is unnecessary: most of the tree can be explored before the user acts.
-
-## 3. Probability-first prefetch worker
-
-The intended runtime has one inference worker maintaining a frontier of speculative nodes.
-
-Each node stores at least:
-
-```text
-parent
-selected token / path suffix
-arithmetic interval
-log probability mass
-forced prefix
-preview metadata
-backend cursor state (or a way to reconstruct it)
-generation epoch
+```python
+predict() -> complete distribution
+observe(token)
+clone()
 ```
 
-The worker keeps a max-priority queue ordered by probability mass (equivalently minimum surprisal):
+For models with large KV caches, `clone()` is semantically convenient and often operationally terrible. Backends can additionally expose:
 
-```text
-priority(node) = log P(node)
+```python
+checkpoint() -> opaque small state
+restore(checkpoint)
 ```
 
-It repeatedly expands the highest-mass unresolved node first. This naturally spends compute on the continuations most likely to appear in the next menu.
+`Navigator` prefers checkpoint/restore whenever available.
 
-## 4. Selection and pruning
+A preallocated append-only transformer cache is particularly friendly to this: a speculative branch writes only after the current offsets. Rewinding those offsets makes the suffix invisible again, so the next branch can overwrite it without copying the immutable prefix.
 
-When the user selects an exact bucket interval `R`:
+## 3. Background tree explorer
 
-1. Intersect the speculative tree with `R`.
-2. Drop every node whose arithmetic region is disjoint from `R`.
-3. Renormalize retained descendant intervals into the selected region.
-4. Advance the live exact navigator and bump a generation epoch.
-5. Reuse already-expanded descendants whenever possible.
-6. Resume probability-first expansion under the retained subtree only.
+`TreeExplorer` owns a single background inference thread around an exact `Navigator`.
 
-The worker must never make semantic decisions for the exact navigator. Prefetch results are caches; the interval arithmetic remains the source of truth.
+It precomputes previews for future **action paths** such as:
 
-## 5. KV-state memory is the hard part
+```text
+(0,)
+(1,)
+...
+(4, 0)
+(4, 1)
+...
+```
 
-Naively cloning a full preallocated transformer KV cache for every speculative node is fast to implement and terrible at scale, especially on a small GPU.
+A path means “apply all earlier bucket choices exactly, then preview the final bucket.” This is useful because a cached path `(a, b)` becomes the immediately useful preview `(b,)` if the user chooses `a`.
 
-Useful backend strategies, in increasing sophistication:
+For a `K`-ary interaction, every action region at depth `d` has exact mass
 
-1. **Active-spine GPU cache** — keep GPU state only for the live path and immediate visible walkers; reconstruct deeper nodes on demand.
-2. **CPU-offloaded branch state** — move inactive KV states to pinned host memory and restore likely branches.
-3. **Parent + suffix replay** — store probabilities/path suffixes and replay from the nearest cached ancestor instead of storing every KV tensor.
-4. **Copy-on-write/persistent KV pages** — share immutable prefix pages between walkers and allocate only divergent suffix pages. This is the ideal backend API for large speculative trees.
+$$
+K^{-d}.
+$$
 
-The generic natwalk core should not require any one strategy. Cursor cloning is the semantic interface; backends can optimize it independently.
+So probability-mass-first scheduling over action regions is simply shallow-first. Equal-mass paths are tie-broken lexicographically, which explores modeward buckets before the residual bucket.
 
-## 6. UI rendering
+Only paths ending in visible buckets need a rendered preview. Residual buckets still appear inside path prefixes so their descendants are prefetched.
 
-Raw model tokens are useful for debugging but not for humans. Presentation should be a separate layer:
+## 4. Selection, pruning, and rebasing
+
+Suppose the cache contains:
+
+```text
+(0,)      preview A
+(1,)      preview B
+(0, 0)    preview AA
+(0, 1)    preview AB
+(1, 0)    preview BA
+...
+```
+
+If the user selects bucket `0`:
+
+1. The exact navigator commits that equal-information action.
+2. The generation epoch increments.
+3. Every cached path not beginning with `0` is discarded.
+4. Descendant paths are rebased:
+
+```text
+(0, 0) -> (0,)
+(0, 1) -> (1,)
+```
+
+5. Stale in-flight work from the old epoch is ignored when it completes.
+6. Missing descendants are scheduled under the new root.
+
+The worker never decides semantics. Its previews are disposable caches; the arithmetic interval is always authoritative.
+
+## 5. Concurrency model
+
+Model inference and live `choose()` calls share one compute lock. This intentionally serializes accelerator access for stateful backends.
+
+The worker may temporarily walk and rewind the real cursor, so the UI must not inspect that mutable cursor directly while inference is happening. `TreeExplorer` therefore publishes an immutable `NavigationSnapshot` containing only:
+
+```text
+committed prefix
+ended flag
+[lo, hi)
+action count
+path surprisal
+```
+
+The UI can repaint from the snapshot and cached previews without touching speculative model state.
+
+## 6. MuScriptor backend
+
+MuScriptor's streaming transformer preallocates KV tensors and controls visible history using offsets. The natwalk example checkpoints:
+
+```text
+prefix / ended
+current input token
+first-step flag
+cached probability vector
+streaming offset/control state
+```
+
+It deliberately does **not** copy tensors named `cache`.
+
+Before a checkpoint, `predict()` ensures the current conditioning/input has been written into KV. A speculative branch then advances offsets and writes later slots. Restoring the saved offsets hides that suffix; the next branch overwrites it.
+
+This replaces repeated large KV tensor clones with tiny control-state copies.
+
+## 7. Memory strategy
+
+The current explorer caches preview metadata, not one full backend cursor per tree node. That keeps the generic tree cheap and avoids turning speculative depth into VRAM growth.
+
+More advanced backends can later add:
+
+```text
+persistent / paged KV
+batched branch prediction
+CPU-offloaded checkpoints
+parent + suffix replay
+fork_many(tokens)
+```
+
+Those are performance extensions only. They must preserve the exact same complete distribution and causal semantics.
+
+## 8. UI rendering
+
+Raw model tokens are still only a debugging representation. Presentation should remain separate:
 
 ```text
 model token path
@@ -84,26 +155,4 @@ domain event decoder
 renderable continuation
 ```
 
-For MuScriptor that likely means decoding preview paths into notes/instruments/timing and rendering a compact piano roll or staff-like view. The exact arithmetic interval remains attached to each rendered option so presentation never changes probability semantics.
-
-## 7. Future backend API
-
-The minimal API is:
-
-```python
-predict() -> complete distribution
-observe(token)
-clone()
-```
-
-For efficient background expansion, backends may additionally expose capabilities such as:
-
-```python
-fork_many(tokens)
-snapshot()
-restore(snapshot)
-replay(tokens)
-batch_predict(cursors)
-```
-
-These are performance extensions only. They must preserve the same exact distribution and causal state semantics as the minimal cursor.
+For MuScriptor, the next useful layer is a compact piano-roll/staff-like rendering of each preview while retaining the exact arithmetic interval behind the option.

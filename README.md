@@ -97,33 +97,65 @@ Then:
 from natwalk import Navigator
 
 nav = Navigator(cursor, choices=5)
-
 preview = nav.preview(0)  # does not mutate state
 forced = nav.choose(0)  # exactly ln(5) nats of user information
 ```
 
 `predict()` must expose the **complete normalized distribution**. natwalk deliberately has no top-k or top-p approximation in its core semantics.
 
+### Cheap speculative rewind
+
+Cloning a transformer's full KV cache for every preview is often absurdly expensive. Backends may additionally implement:
+
+```python
+def checkpoint(self) -> object: ...
+def restore(self, checkpoint: object) -> None: ...
+```
+
+`Navigator` detects this capability automatically and explores previews in-place. A backend with a preallocated append-only KV cache can often checkpoint only offsets and logical metadata, then rewind those offsets and overwrite speculative suffix slots.
+
+## Background tree explorer
+
+`TreeExplorer` moves speculative preview generation off the interaction path:
+
+```python
+from natwalk import Navigator, TreeExplorer
+
+nav = Navigator(cursor, choices=5)
+
+with TreeExplorer(nav, prefetch_depth=2) as explorer:
+    explorer.wait_current()
+    options = explorer.current_previews()
+    explorer.choose(0)
+```
+
+The worker precomputes future action paths and caches their previews. At action depth `d`, every region has exactly probability mass `K^-d`, so it expands shallow regions first; equal-mass regions are tie-broken modeward. When the user chooses bucket `j`, cached paths not beginning with `j` are discarded and descendants of `j` are rebased to the new root.
+
+The exact `Navigator` remains the source of truth. Worker results are only caches.
+
 ## MuScriptor demo
 
 The first backend is [MuScriptor](https://github.com/muscriptor/muscriptor), using its full 1,393-symbol transcription distribution and streaming KV state.
 
-If you already have a MuScriptor checkout/environment:
+The adapter implements cheap checkpoint/restore by rewinding MuScriptor's streaming offsets rather than cloning its bulk KV tensors. The CLI continuously repaints while one background inference worker fills the current menu and likely descendants.
+
+With sibling checkouts at `~/Projects/muscriptor` and `~/Projects/natwalk`:
 
 ```bash
-# inside the MuScriptor virtualenv
-uv pip install -e /path/to/natwalk
-
-uv run /path/to/natwalk/examples/muscriptor_cli.py \
+uv run \
+  --project ~/Projects/muscriptor \
+  --with-editable ~/Projects/natwalk \
+  -- python ~/Projects/natwalk/examples/muscriptor_cli.py \
   "samples/Laura Marling - What He Wrote.mp3" \
   --model medium \
   --device cuda \
-  --chunk 0
+  --chunk 0 \
+  --prefetch-depth 2
 ```
 
 The demo currently navigates one 5-second chunk. Chunk 0 matches MuScriptor's normal start-of-stream conditioning. Cross-chunk tie/prelude state is not wired into natwalk yet.
 
-> The adapter currently uses MuScriptor private APIs (`_compute_logits`, `_build_conditions`, streaming model state) because the public transcription API does not expose the complete distribution or a clonable cursor.
+> The adapter currently uses MuScriptor private APIs (`_compute_logits`, `_build_conditions`, streaming model state) because the public transcription API does not expose the complete distribution or a rewindable cursor.
 
 ## Why `natwalk`?
 
@@ -135,6 +167,13 @@ That makes the same interaction meaningful for text, code, music transcription, 
 
 ## Current status
 
-Early prototype. The exact arithmetic navigation is working; the MuScriptor CLI is the first live demo.
+Early prototype, but the core pieces are live:
 
-Next engineering target: **probability-first speculative expansion**. A background worker should keep expanding the highest-mass unresolved descendants, cache their model states/previews, and prune everything outside the selected interval after each user action. See [`ARCHITECTURE.md`](ARCHITECTURE.md).
+- exact fixed-information navigation,
+- complete residual buckets,
+- forced-vs-representative semantics,
+- rewindable speculative cursors,
+- background tree prefetch + prune/rebase,
+- MuScriptor CLI demo.
+
+Next UI target: render musical continuations as notes/piano-roll fragments instead of raw model tokens.

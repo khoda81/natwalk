@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import bisect
+import heapq
+import itertools
 import math
-from collections.abc import Sequence
+import threading
+import time
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -24,6 +29,14 @@ class Cursor(Protocol):
     def predict(self) -> Sequence[float]: ...
 
     def observe(self, token: int) -> None: ...
+
+
+class RewindableCursor(Cursor, Protocol):
+    """Optional fast branching API for backends with large mutable caches."""
+
+    def checkpoint(self) -> object: ...
+
+    def restore(self, checkpoint: object) -> None: ...
 
 
 @dataclass
@@ -64,17 +77,31 @@ class RankedDistribution:
     edges: tuple[float, ...]
 
 
+@dataclass(frozen=True)
+class NavigationSnapshot:
+    """Immutable public view of the live navigation state."""
+
+    prefix: tuple[int, ...]
+    ended: bool
+    lo: float
+    hi: float
+    actions: int
+    path_surprisal: float
+
+
+@dataclass(frozen=True)
+class ExplorerStats:
+    """Observable state of :class:`TreeExplorer`'s speculative cache."""
+
+    cached: int
+    queued: int
+    computing: bool
+    expanded: int
+    generation: int
+
+
 class Navigator:
-    """K-ary arithmetic navigator over a complete autoregressive distribution.
-
-    Every user action selects one of ``K`` equal-width subintervals of the
-    unresolved arithmetic-code interval, so each action contributes exactly
-    ``ln(K)`` nats (``log2(K)`` bits) of information.
-
-    Tokens are committed only when *every* code point in the selected interval
-    agrees on the same next token. This is the key completeness invariant: the
-    navigator never silently approximates a bucket with a representative path.
-    """
+    """K-ary arithmetic navigator over a complete autoregressive distribution."""
 
     def __init__(
         self,
@@ -123,7 +150,6 @@ class Navigator:
             raise ValueError("predict() returned zero total probability")
         probs = [p / total for p in probs]
 
-        # Stable sort means equal-probability symbols retain token-id order.
         order = sorted(range(n), key=probs.__getitem__, reverse=True)
         ranked = [probs[token] for token in order]
 
@@ -132,16 +158,51 @@ class Navigator:
         for p in ranked:
             cumulative += p
             edges.append(cumulative)
-        # Clamp accumulated floating-point drift at the exact endpoint.
         edges[-1] = 1.0
 
         return RankedDistribution(tuple(order), tuple(ranked), tuple(edges))
 
     @staticmethod
     def _child_index(edges: Sequence[float], x: float) -> int:
-        # Arithmetic intervals are [lo, hi). Keep x in that half-open domain.
         x = min(max(x, 0.0), math.nextafter(1.0, 0.0))
         return bisect.bisect_right(edges, x) - 1
+
+    @staticmethod
+    def _can_rewind(cursor: Cursor) -> bool:
+        return callable(getattr(cursor, "checkpoint", None)) and callable(
+            getattr(cursor, "restore", None)
+        )
+
+    @contextmanager
+    def _temporary_cursor(self, cursor: Cursor) -> Iterator[Cursor]:
+        if self._can_rewind(cursor):
+            checkpoint = cursor.checkpoint()  # type: ignore[attr-defined]
+            try:
+                yield cursor
+            finally:
+                cursor.restore(checkpoint)  # type: ignore[attr-defined]
+        else:
+            yield cursor.clone()
+
+    @contextmanager
+    def _temporary_state(self) -> Iterator[State]:
+        live = self.state
+        cursor = live.cursor
+
+        if self._can_rewind(cursor):
+            checkpoint = cursor.checkpoint()  # type: ignore[attr-defined]
+            saved = (live.lo, live.hi, live.actions, live.path_surprisal)
+            try:
+                yield live
+            finally:
+                cursor.restore(checkpoint)  # type: ignore[attr-defined]
+                live.lo, live.hi, live.actions, live.path_surprisal = saved
+        else:
+            self.state = live.clone()
+            try:
+                yield self.state
+            finally:
+                self.state = live
 
     def _drain_forced(self, state: State) -> tuple[State, tuple[int, ...]]:
         forced: list[int] = []
@@ -151,8 +212,6 @@ class Navigator:
             right_probe = math.nextafter(state.hi, state.lo)
             left_i = self._child_index(ranked.edges, state.lo)
             right_i = self._child_index(ranked.edges, right_probe)
-
-            # The current exact interval straddles multiple next-token cells.
             if left_i != right_i:
                 break
 
@@ -197,11 +256,7 @@ class Navigator:
         *,
         max_tokens: int | None = None,
     ) -> tuple[int, ...]:
-        """Decode one representative arithmetic-code point.
-
-        This is intended for display only. It does not represent the entire
-        selected bucket and must never be treated as committed state.
-        """
+        """Decode one representative arithmetic-code point for display only."""
         limit = self.preview_tokens if max_tokens is None else max_tokens
         out: list[int] = []
 
@@ -223,18 +278,284 @@ class Navigator:
 
         return tuple(out)
 
-    def preview(self, bucket: int) -> Preview:
-        """Preview one bucket without mutating the live navigator."""
-        state = self.state.clone()
-        self._narrow(state, bucket)
-        state, forced = self._drain_forced(state)
+    def _preview_current(self, bucket: int) -> Preview:
+        self._narrow(self.state, bucket)
+        self.state, forced = self._drain_forced(self.state)
 
-        if state.cursor.ended or self.preview_tokens == 0:
+        if self.state.cursor.ended or self.preview_tokens == 0:
             representative: tuple[int, ...] = ()
         else:
-            midpoint = (state.lo + state.hi) / 2.0
-            representative = self.decode_point(
-                state.cursor.clone(), midpoint, max_tokens=self.preview_tokens
-            )
+            midpoint = (self.state.lo + self.state.hi) / 2.0
+            with self._temporary_cursor(self.state.cursor) as cursor:
+                representative = self.decode_point(
+                    cursor, midpoint, max_tokens=self.preview_tokens
+                )
 
         return Preview(bucket=bucket, forced=forced, representative=representative)
+
+    def preview(self, bucket: int) -> Preview:
+        """Preview one bucket without mutating the live navigator."""
+        with self._temporary_state():
+            return self._preview_current(bucket)
+
+    def preview_path(self, buckets: Sequence[int]) -> Preview:
+        """Preview the final action in a speculative multi-action path."""
+        path = tuple(buckets)
+        if not path:
+            raise ValueError("preview path must contain at least one bucket")
+
+        with self._temporary_state():
+            for bucket in path[:-1]:
+                if self.state.cursor.ended:
+                    return Preview(bucket=path[-1], forced=(), representative=())
+                self._narrow(self.state, bucket)
+                self.state, _ = self._drain_forced(self.state)
+            if self.state.cursor.ended:
+                return Preview(bucket=path[-1], forced=(), representative=())
+            return self._preview_current(path[-1])
+
+
+class TreeExplorer:
+    """Background probability-mass-first speculative tree for a Navigator.
+
+    Every depth-d action region has exact mass ``choices**-d``. The worker
+    therefore expands shallow paths first; equal-mass paths are tie-broken
+    lexicographically so modeward buckets are explored before residual ones.
+
+    Only paths ending in visible buckets are cached. Residual buckets are still
+    traversed as ancestors, so selecting ``…`` can immediately reuse any
+    already-computed descendants.
+    """
+
+    def __init__(
+        self,
+        navigator: Navigator,
+        *,
+        prefetch_depth: int = 2,
+        max_cached: int = 128,
+        autostart: bool = True,
+    ) -> None:
+        if prefetch_depth < 1:
+            raise ValueError("prefetch_depth must be >= 1")
+        if max_cached < navigator.choices - 1:
+            raise ValueError("max_cached must fit all visible current choices")
+
+        self.navigator = navigator
+        self.prefetch_depth = prefetch_depth
+        self.max_cached = max_cached
+
+        self._condition = threading.Condition()
+        self._compute_lock = threading.Lock()
+        self._queue: list[tuple[int, tuple[int, ...], int]] = []
+        self._pending: set[tuple[int, ...]] = set()
+        self._cache: dict[tuple[int, ...], Preview] = {}
+        self._generation = 0
+        self._expanded = 0
+        self._computing = False
+        self._stop = False
+        self._error: BaseException | None = None
+        self._thread: threading.Thread | None = None
+        self._snapshot = self._snapshot_live()
+
+        with self._condition:
+            self._schedule_locked()
+        if autostart:
+            self.start()
+
+    def __enter__(self) -> TreeExplorer:
+        self.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    @property
+    def choices(self) -> int:
+        return self.navigator.choices
+
+    def _snapshot_live(self) -> NavigationSnapshot:
+        state = self.navigator.state
+        return NavigationSnapshot(
+            prefix=tuple(state.cursor.prefix),
+            ended=state.cursor.ended,
+            lo=state.lo,
+            hi=state.hi,
+            actions=state.actions,
+            path_surprisal=state.path_surprisal,
+        )
+
+    @property
+    def snapshot(self) -> NavigationSnapshot:
+        with self._condition:
+            return self._snapshot
+
+    @property
+    def supplied_nats(self) -> float:
+        return self.snapshot.actions * self.nats_per_action
+
+    @property
+    def supplied_bits(self) -> float:
+        return self.snapshot.actions * self.bits_per_action
+
+    @property
+    def nats_per_action(self) -> float:
+        return self.navigator.nats_per_action
+
+    @property
+    def bits_per_action(self) -> float:
+        return self.navigator.bits_per_action
+
+    def start(self) -> None:
+        with self._condition:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            if self._stop:
+                raise RuntimeError("cannot restart a closed TreeExplorer")
+            self._thread = threading.Thread(
+                target=self._worker,
+                name="natwalk-prefetch",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def close(self) -> None:
+        with self._condition:
+            self._stop = True
+            self._condition.notify_all()
+            thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+
+    def _candidate_paths(self) -> Iterator[tuple[int, ...]]:
+        visible = range(self.choices - 1)
+        all_buckets = range(self.choices)
+        for depth in range(1, self.prefetch_depth + 1):
+            if depth == 1:
+                for bucket in visible:
+                    yield (bucket,)
+                continue
+            for prefix in itertools.product(all_buckets, repeat=depth - 1):
+                for bucket in visible:
+                    yield (*prefix, bucket)
+
+    def _schedule_locked(self) -> None:
+        if self._snapshot.ended:
+            return
+
+        for path in self._candidate_paths():
+            if path in self._cache or path in self._pending:
+                continue
+            if len(self._cache) + len(self._pending) >= self.max_cached:
+                break
+            heapq.heappush(self._queue, (len(path), path, self._generation))
+            self._pending.add(path)
+        self._condition.notify_all()
+
+    def _worker(self) -> None:
+        while True:
+            with self._condition:
+                while not self._queue and not self._stop:
+                    self._condition.wait()
+                if self._stop:
+                    return
+                _depth, path, generation = heapq.heappop(self._queue)
+                self._pending.discard(path)
+                if generation != self._generation or path in self._cache:
+                    continue
+                self._computing = True
+
+            preview: Preview | None = None
+            error: BaseException | None = None
+            try:
+                with self._compute_lock:
+                    with self._condition:
+                        stale = generation != self._generation or self._stop
+                    if not stale:
+                        preview = self.navigator.preview_path(path)
+            except BaseException as exc:
+                error = exc
+
+            with self._condition:
+                self._computing = False
+                if preview is not None and generation == self._generation and not self._stop:
+                    self._cache[path] = preview
+                    self._expanded += 1
+                self._condition.notify_all()
+
+                if error is not None:
+                    self._error = error
+                    self._stop = True
+                    self._condition.notify_all()
+                    return
+
+    def _raise_worker_error_locked(self) -> None:
+        if self._error is not None:
+            raise RuntimeError("natwalk background worker failed") from self._error
+
+    def preview(self, bucket: int) -> Preview | None:
+        """Return a cached current preview, or None while it is computing."""
+        if not 0 <= bucket < self.choices - 1:
+            raise ValueError(f"visible bucket must be in [0, {self.choices - 1})")
+        with self._condition:
+            self._raise_worker_error_locked()
+            return self._cache.get((bucket,))
+
+    def current_previews(self) -> tuple[Preview | None, ...]:
+        with self._condition:
+            self._raise_worker_error_locked()
+            return tuple(self._cache.get((bucket,)) for bucket in range(self.choices - 1))
+
+    def wait_current(self, timeout: float | None = None) -> bool:
+        """Wait until every visible current preview is cached."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._condition:
+            while True:
+                self._raise_worker_error_locked()
+                if self._snapshot.ended:
+                    return True
+                if all((bucket,) in self._cache for bucket in range(self.choices - 1)):
+                    return True
+                if deadline is None:
+                    self._condition.wait()
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    self._condition.wait(remaining)
+
+    def choose(self, bucket: int) -> tuple[int, ...]:
+        """Commit a choice, prune non-descendants, and rebase cached descendants."""
+        if not 0 <= bucket < self.choices:
+            raise ValueError(f"bucket must be in [0, {self.choices})")
+
+        with self._compute_lock:
+            with self._condition:
+                self._raise_worker_error_locked()
+
+            forced = self.navigator.choose(bucket)
+
+            with self._condition:
+                self._snapshot = self._snapshot_live()
+                self._generation += 1
+                self._cache = {
+                    path[1:]: preview
+                    for path, preview in self._cache.items()
+                    if len(path) > 1 and path[0] == bucket
+                }
+                self._queue.clear()
+                self._pending.clear()
+                self._schedule_locked()
+                self._condition.notify_all()
+
+        return forced
+
+    def stats(self) -> ExplorerStats:
+        with self._condition:
+            self._raise_worker_error_locked()
+            return ExplorerStats(
+                cached=len(self._cache),
+                queued=len(self._queue),
+                computing=self._computing,
+                expanded=self._expanded,
+                generation=self._generation,
+            )

@@ -1,14 +1,14 @@
 """MuScriptor demo backend for natwalk.
 
-This adapter intentionally uses MuScriptor private APIs because natwalk needs the
-complete next-token distribution and a clonable causal KV-cache cursor, neither
-of which is currently exposed by MuScriptor's public transcription API.
+The adapter uses MuScriptor private APIs because natwalk needs the complete
+next-token distribution and direct access to its streaming model state.
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import select
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from muscriptor import TranscriptionModel
 from muscriptor.modules.streaming import increment_steps, init_states
 
-from natwalk import Navigator
+from natwalk import Navigator, TreeExplorer
 
 VALID_CARD = 1393
 SAMPLE_RATE = 16_000
@@ -33,6 +33,7 @@ def midi_name(pitch: int) -> str:
 
 
 def clone_model_state(model_state: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Expensive compatibility fallback used only by Cursor.clone()."""
     out: dict[str, dict[str, Any]] = {}
     for module_name, state in model_state.items():
         cloned: dict[str, Any] = {}
@@ -40,6 +41,37 @@ def clone_model_state(model_state: dict[str, dict[str, Any]]) -> dict[str, dict[
             cloned[key] = value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
         out[module_name] = cloned
     return out
+
+
+def snapshot_control_state(
+    model_state: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Snapshot tiny streaming controls while deliberately sharing KV storage."""
+    out: dict[str, dict[str, Any]] = {}
+    for module_name, state in model_state.items():
+        controls: dict[str, Any] = {}
+        for key, value in state.items():
+            if key == "cache":
+                continue
+            controls[key] = (
+                value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
+            )
+        out[module_name] = controls
+    return out
+
+
+def restore_control_state(
+    model_state: dict[str, dict[str, Any]],
+    snapshot: dict[str, dict[str, Any]],
+) -> None:
+    for module_name, controls in snapshot.items():
+        state = model_state[module_name]
+        for key, saved in controls.items():
+            current = state[key]
+            if isinstance(current, torch.Tensor):
+                current.copy_(saved)
+            else:
+                state[key] = copy.deepcopy(saved)
 
 
 class MuscriptorContext:
@@ -77,26 +109,26 @@ class MuscriptorContext:
 
     def describe(self, token: int) -> str:
         event = self.tokenizer._vocab[token]
-        t, value = event.type, event.value
-        if t in {"PAD", "EOS", "UNK"}:
-            return t
-        if t == "shift":
+        kind, value = event.type, event.value
+        if kind in {"PAD", "EOS", "UNK"}:
+            return kind
+        if kind == "shift":
             return f"shift({value / self.tokenizer.frame_rate:.2f}s)"
-        if t == "pitch":
+        if kind == "pitch":
             return f"pitch({midi_name(value)})"
-        if t == "velocity":
+        if kind == "velocity":
             return "note_on" if value else "note_off"
-        if t == "tie":
+        if kind == "tie":
             return "tie"
-        if t == "program":
+        if kind == "program":
             return f"program({self.tm._instrument_for_program(value)})"
-        if t == "drum":
+        if kind == "drum":
             return f"drum({midi_name(value)})"
-        return f"{t}({value})"
+        return f"{kind}({value})"
 
 
 class MuscriptorCursor:
-    """Clonable complete-distribution cursor over one MuScriptor audio chunk."""
+    """Complete-distribution cursor over one MuScriptor audio chunk."""
 
     def __init__(self, ctx: MuscriptorContext) -> None:
         self.ctx = ctx
@@ -114,6 +146,7 @@ class MuscriptorCursor:
         self._probs: torch.Tensor | None = None
 
     def clone(self) -> MuscriptorCursor:
+        """Full KV clone fallback; natwalk previews prefer checkpoint/restore."""
         self.predict()
         other = object.__new__(MuscriptorCursor)
         other.ctx = self.ctx
@@ -126,6 +159,27 @@ class MuscriptorCursor:
         other.first_step = self.first_step
         other._probs = self._probs
         return other
+
+    def checkpoint(self) -> object:
+        """Cheap branch point: no KV tensors are copied."""
+        self.predict()
+        return (
+            self.prefix,
+            self.ended,
+            self.input.clone(),
+            self.first_step,
+            self._probs,
+            snapshot_control_state(self.model_state),
+        )
+
+    def restore(self, checkpoint: object) -> None:
+        prefix, ended, input_, first_step, probs, controls = checkpoint
+        restore_control_state(self.model_state, controls)
+        self.prefix = prefix
+        self.ended = ended
+        self.input = input_
+        self.first_step = first_step
+        self._probs = probs
 
     @torch.inference_mode()
     def predict(self) -> Sequence[float]:
@@ -178,7 +232,7 @@ class MuscriptorCursor:
 def fmt_tokens(ctx: MuscriptorContext, tokens: Sequence[int], limit: int = 8) -> str:
     if not tokens:
         return "∅"
-    shown = [ctx.describe(t) for t in tokens[:limit]]
+    shown = [ctx.describe(token) for token in tokens[:limit]]
     if len(tokens) > limit:
         shown.append("…")
     return " · ".join(shown)
@@ -189,48 +243,56 @@ def clear() -> None:
         print("\033[2J\033[H", end="")
 
 
-def print_screen(nav: Navigator, ctx: MuscriptorContext) -> None:
+def print_screen(explorer: TreeExplorer, ctx: MuscriptorContext) -> None:
     clear()
-    state = nav.state
+    state = explorer.snapshot
+    stats = explorer.stats()
+
     print("MuScriptor information-space navigator")
     print("=" * 78)
     print(
-        f"K={nav.choices}  |  exact cost/action = {nav.nats_per_action:.6f} nat "
-        f"= {nav.bits_per_action:.6f} bit"
+        f"K={explorer.choices}  |  exact cost/action = {explorer.nats_per_action:.6f} nat "
+        f"= {explorer.bits_per_action:.6f} bit"
     )
     print(
-        f"actions={state.actions}  supplied={nav.supplied_nats:.4f} nat  |  "
+        f"actions={state.actions}  supplied={explorer.supplied_nats:.4f} nat  |  "
         f"committed path surprisal={state.path_surprisal:.4f} nat"
     )
     print(
         f"unresolved local interval=[{state.lo:.9f}, {state.hi:.9f})  "
         f"width={state.hi - state.lo:.6g}"
     )
-    print(f"committed tokens={len(state.cursor.prefix)}")
-    if state.cursor.prefix:
-        print("tail:", fmt_tokens(ctx, state.cursor.prefix[-10:], limit=10))
+    print(f"committed tokens={len(state.prefix)}")
+    if state.prefix:
+        print("tail:", fmt_tokens(ctx, state.prefix[-10:], limit=10))
+    print(
+        f"prefetch: cached={stats.cached} queued={stats.queued} "
+        f"expanded={stats.expanded}{'  ⟳' if stats.computing else ''}"
+    )
     print()
 
-    if state.cursor.ended:
+    if state.ended:
         print("EOS is forced. Done.")
         return
 
-    for bucket in range(nav.choices - 1):
-        preview = nav.preview(bucket)
-        if preview.forced:
+    previews = explorer.current_previews()
+    for bucket, preview in enumerate(previews):
+        if preview is None:
+            print(f"[{bucket + 1}] ⟳        computing…")
+        elif preview.forced:
             print(f"[{bucket + 1}] FORCES   {fmt_tokens(ctx, preview.forced)}")
             if preview.representative:
                 print(f"    then ~ {fmt_tokens(ctx, preview.representative)}")
         else:
             print(f"[{bucket + 1}] preview  {fmt_tokens(ctx, preview.representative)}")
 
-    print(f"[{nav.choices}] …        residual / none of the above")
+    print(f"[{explorer.choices}] …        residual / none of the above")
     print()
-    print(f"1-{nav.choices}: choose bucket   SPACE/ENTER: bucket 1   q: quit")
+    print(f"1-{explorer.choices}: choose bucket   SPACE/ENTER: bucket 1   q: quit")
     print("FORCES is exact; preview/~ is only a representative code point.")
 
 
-def read_key() -> str:
+def read_key(timeout: float = 0.25) -> str | None:
     if not sys.stdin.isatty():
         return input("> ").strip()[:1]
 
@@ -241,6 +303,9 @@ def read_key() -> str:
     old = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        if not ready:
+            return None
         ch = sys.stdin.read(1)
         if ch == "\x03":
             raise KeyboardInterrupt
@@ -258,6 +323,8 @@ def main() -> None:
     ap.add_argument("--choices", type=int, default=5)
     ap.add_argument("--preview-tokens", type=int, default=8)
     ap.add_argument("--max-tokens", type=int, default=256)
+    ap.add_argument("--prefetch-depth", type=int, default=2)
+    ap.add_argument("--prefetch-cache", type=int, default=128)
     args = ap.parse_args()
 
     print(f"Loading MuScriptor {args.model} on {args.device} …", file=sys.stderr)
@@ -271,28 +338,37 @@ def main() -> None:
     nav = Navigator(ctx.new_cursor(), choices=args.choices, preview_tokens=args.preview_tokens)
 
     try:
-        while True:
-            print_screen(nav, ctx)
-            if nav.state.cursor.ended:
-                break
-            key = read_key()
-            if key.lower() == "q":
-                break
-            if key in (" ", "\r", "\n"):
-                bucket = 0
-            elif key.isdigit() and 1 <= int(key) <= nav.choices:
-                bucket = int(key) - 1
-            else:
-                continue
-            nav.choose(bucket)
+        with TreeExplorer(
+            nav,
+            prefetch_depth=args.prefetch_depth,
+            max_cached=args.prefetch_cache,
+        ) as explorer:
+            while True:
+                print_screen(explorer, ctx)
+                if explorer.snapshot.ended:
+                    break
+
+                key = read_key()
+                if key is None:
+                    continue
+                if key.lower() == "q":
+                    break
+                if key in (" ", "\r", "\n"):
+                    bucket = 0
+                elif key.isdigit() and 1 <= int(key) <= explorer.choices:
+                    bucket = int(key) - 1
+                else:
+                    continue
+                explorer.choose(bucket)
     except KeyboardInterrupt:
         pass
     finally:
+        state = nav.state
         print()
         print(
-            f"final: actions={nav.state.actions}, supplied={nav.supplied_nats:.6f} nat "
-            f"({nav.supplied_bits:.6f} bit), committed_tokens={len(nav.state.cursor.prefix)}, "
-            f"path_surprisal={nav.state.path_surprisal:.6f} nat"
+            f"final: actions={state.actions}, supplied={nav.supplied_nats:.6f} nat "
+            f"({nav.supplied_bits:.6f} bit), committed_tokens={len(state.cursor.prefix)}, "
+            f"path_surprisal={state.path_surprisal:.6f} nat"
         )
 
 
