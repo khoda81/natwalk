@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import termios
+import tty
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -31,20 +33,25 @@ import muscriptor_cli_compact as compact  # noqa: E402
 
 
 @contextlib.contextmanager
-def alternate_screen() -> Iterator[None]:
-    """Use the terminal's alternate screen and always restore the normal one."""
+def terminal_session() -> Iterator[None]:
+    """Use a full-screen raw terminal session and restore it unconditionally."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         yield
         return
 
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+
     # 1049: save cursor + enter alternate screen. 25: hide cursor while the
-    # full-screen app is active. The finally block restores both on normal
-    # exit, q, Ctrl-C, or a Python exception.
+    # full-screen app is active. Keep stdin raw for the entire session so no
+    # key can arrive in the tiny canonical/echo window between UI refreshes.
     sys.stdout.write("\033[?1049h\033[H\033[?25l")
     sys.stdout.flush()
+    tty.setraw(fd)
     try:
         yield
     finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
         sys.stdout.write("\033[?25h\033[?1049l")
         sys.stdout.flush()
 
@@ -58,7 +65,7 @@ def _default_auto_tree_height() -> None:
 
 def main() -> None:
     _default_auto_tree_height()
-    with alternate_screen():
+    with terminal_session():
         compact.cli.main()
 
 
