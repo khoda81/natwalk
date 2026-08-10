@@ -42,6 +42,23 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(len(session.tree.nodes), nodes)
         self.assertEqual(navigation.state, State(lo=0.5, hi=1.0, actions=1))
 
+    def test_undo_of_unforced_choice_keeps_search_progress(self) -> None:
+        cursor = TableCursor({(): (0.4, 0.35, 0.25), (0,): ()})
+        session = Session(cursor)
+        navigation = Navigation(session)
+        navigation.choose(1)
+        session.search.step()
+        frontier = tuple(session.search.frontier)
+        nodes = len(session.tree.nodes)
+
+        self.assertTrue(navigation.undo())
+
+        self.assertEqual(navigation.state, State())
+        self.assertEqual(session.root, session.tree.root)
+        self.assertEqual(cursor.prefix, ())
+        self.assertEqual(tuple(session.search.frontier), frontier)
+        self.assertEqual(len(session.tree.nodes), nodes)
+
     def test_choice_commits_all_tokens_forced_by_same_action(self) -> None:
         cursor = TableCursor(
             {
