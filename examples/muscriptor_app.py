@@ -80,6 +80,78 @@ def _rgb(text: str, rgb: tuple[int, int, int]) -> str:
     return f"\033[38;2;{red};{green};{blue}m{text}\033[0m"
 
 
+# Filled while building the current view. Compact corridors retain their token
+# paths, so this lets the renderer recover every token's local surprisal even
+# though several tree nodes have been compressed into one terminal row.
+_edge_nats_by_path: dict[tuple[int, ...], float] = {}
+
+
+def _styled_corridor_label(
+    row: compact._DisplayRow,
+    *,
+    base: tuple[int, int, int],
+    row_intensity: float,
+    max_chars: int,
+    collapsed: bool,
+) -> tuple[str, int]:
+    """Color each token by its own conditional probability and fit the row."""
+    node = row.node
+    if node.is_ellipsis or not node.corridor_paths:
+        plain = node.label
+        if collapsed and not node.is_ellipsis:
+            plain = f"▸ {plain}"
+        elif len(node.corridor_paths) > 1:
+            plain = f"{plain}  ▸"
+        if len(plain) > max_chars:
+            plain = plain[: max(1, max_chars - 1)] + "…"
+        return _rgb(plain, _scale_rgb(base, row_intensity)), len(plain)
+
+    labels = node.label.split(" · ")
+    if len(labels) != len(node.corridor_paths):
+        # Descriptions currently never contain the separator, but keep a safe
+        # fallback if a future tokenizer does.
+        plain = node.label
+        if len(plain) > max_chars:
+            plain = plain[: max(1, max_chars - 1)] + "…"
+        return _rgb(plain, _scale_rgb(base, row_intensity)), len(plain)
+
+    rendered: list[str] = []
+    used = 0
+    if collapsed and max_chars >= 2:
+        rendered.append(_rgb("▸ ", _scale_rgb(base, row_intensity)))
+        used = 2
+
+    complete = True
+    for index, (label, path) in enumerate(zip(labels, node.corridor_paths, strict=True)):
+        prefix = "" if index == 0 else " · "
+        chunk = prefix + label
+        remaining = max_chars - used
+        if remaining <= 0:
+            complete = False
+            break
+
+        cost = _edge_nats_by_path.get(path, node.cost_nats)
+        token_rgb = _scale_rgb(base, _probability_intensity(cost))
+        if len(chunk) <= remaining:
+            rendered.append(_rgb(chunk, token_rgb))
+            used += len(chunk)
+            continue
+
+        visible = max(1, remaining - 1)
+        rendered.append(_rgb(chunk[:visible] + "…", token_rgb))
+        used += min(remaining, visible + 1)
+        complete = False
+        break
+
+    if complete and not collapsed and len(node.corridor_paths) > 1:
+        marker = "  ▸"
+        if used + len(marker) <= max_chars:
+            rendered.append(_rgb(marker, _scale_rgb(base, row_intensity)))
+            used += len(marker)
+
+    return "".join(rendered), used
+
+
 def _probability_render_row(
     row: compact._DisplayRow,
     *,
@@ -87,30 +159,29 @@ def _probability_render_row(
     collapsed: bool,
     width: int,
 ) -> str:
-    """Render probability as row luminance while keeping cursor glyphs vivid."""
+    """Render local token probability while keeping cumulative corridor cost."""
     guides = "".join("    " if last else "│   " for last in row.ancestor_last)
     connector = "└── " if row.is_last else "├── "
     highlighted = row.node.highlighted
     suggestion_marker = "▶ " if highlighted else "  "
     select_marker = "❯ " if selected else "  "
 
-    label = row.node.label
-    if collapsed and not row.node.is_ellipsis:
-        label = f"▸ {label}"
-    elif len(row.node.corridor_paths) > 1:
-        label = f"{label}  ▸"
-
-    body = f"{guides}{connector}{label}"
     suffix = f"{max(0.0, row.node.cost_nats):7.3f} nat"
     room = max(1, width - len(select_marker) - len(suggestion_marker) - len(suffix) - 1)
-    if len(body) > room:
-        body = body[: max(1, room - 1)] + "…"
-    payload = f"{body:<{room}} {suffix}"
+    prefix = f"{guides}{connector}"
+    label_room = max(1, room - len(prefix))
 
     if not compact.cli.sys.stdout.isatty():
-        return f"{select_marker}{suggestion_marker}{payload}"
+        label = row.node.label
+        if collapsed and not row.node.is_ellipsis:
+            label = f"▸ {label}"
+        elif len(row.node.corridor_paths) > 1:
+            label = f"{label}  ▸"
+        body = prefix + label
+        if len(body) > room:
+            body = body[: max(1, room - 1)] + "…"
+        return f"{select_marker}{suggestion_marker}{body:<{room}} {suffix}"
 
-    intensity = _probability_intensity(row.node.cost_nats)
     if selected and highlighted:
         base = (255, 120, 255)
     elif selected:
@@ -120,14 +191,26 @@ def _probability_render_row(
     else:
         base = (245, 245, 245)
 
+    row_intensity = _probability_intensity(row.node.cost_nats)
+    scaffold = _rgb(prefix, _scale_rgb(base, row_intensity))
+    label, label_len = _styled_corridor_label(
+        row,
+        base=base,
+        row_intensity=row_intensity,
+        max_chars=label_room,
+        collapsed=collapsed,
+    )
+    body_len = len(prefix) + label_len
+    padding = " " * max(0, room - body_len)
+    suffix_text = _rgb(suffix, _scale_rgb(base, row_intensity))
+
     # Selection/navigation markers remain fully saturated so an improbable row
-    # never hides the user's location. The row itself carries probability.
+    # never hides the user's location. Token text itself carries probability.
     if selected:
         select_marker = _rgb(select_marker, (255, 220, 80))
     if highlighted:
         suggestion_marker = _rgb(suggestion_marker, (80, 220, 255))
-    payload = _rgb(payload, _scale_rgb(base, intensity))
-    return f"{select_marker}{suggestion_marker}{payload}"
+    return f"{select_marker}{suggestion_marker}{scaffold}{label}{padding} {suffix_text}"
 
 
 compact._render_row = _probability_render_row
@@ -155,6 +238,7 @@ def _focused_tree_entries(
     the complete vocabulary for every expanded node on every frame, residual
     mass is simply one minus the already-materialized child mass.
     """
+    _edge_nats_by_path.clear()
     with explorer._condition:  # noqa: SLF001 - example view over explorer cache
         explorer._raise_worker_error_locked()  # noqa: SLF001
         active_lo, active_hi = explorer._active_interval_locked()  # noqa: SLF001
@@ -173,6 +257,7 @@ def _focused_tree_entries(
         entries: list[compact.cli.TreeEntry] = []
 
         def append_actual(node: object, depth: int) -> None:
+            _edge_nats_by_path[node.path] = node.edge_nats
             entries.append(
                 compact.cli.TreeEntry(
                     path=node.path,
@@ -220,9 +305,11 @@ def _focused_tree_entries(
 
                     probability = ranked.probabilities[rank]
                     edge_nats = -math.log(probability) if probability > 0.0 else math.inf
+                    path = (*parent_path, token)
+                    _edge_nats_by_path[path] = edge_nats
                     entries.append(
                         compact.cli.TreeEntry(
-                            path=(*parent_path, token),
+                            path=path,
                             depth=depth,
                             token=token,
                             edge_nats=edge_nats,
