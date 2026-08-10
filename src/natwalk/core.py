@@ -287,9 +287,7 @@ class Navigator:
         else:
             midpoint = (self.state.lo + self.state.hi) / 2.0
             with self._temporary_cursor(self.state.cursor) as cursor:
-                representative = self.decode_point(
-                    cursor, midpoint, max_tokens=self.preview_tokens
-                )
+                representative = self.decode_point(cursor, midpoint, max_tokens=self.preview_tokens)
 
         return Preview(bucket=bucket, forced=forced, representative=representative)
 
