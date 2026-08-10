@@ -431,11 +431,7 @@ class Navigator:
         else:
             midpoint = (self.state.lo + self.state.hi) / 2.0
             with self.temporary_cursor(self.state.cursor) as cursor:
-                representative = self.decode_point(
-                    cursor,
-                    midpoint,
-                    max_tokens=self.preview_tokens,
-                )
+                representative = self.decode_point(cursor, midpoint, max_tokens=self.preview_tokens)
 
         return Preview(bucket=bucket, forced=forced, representative=representative)
 
@@ -785,7 +781,12 @@ class TokenTreeExplorer:
 
             if kind == self._EXPAND:
                 node = self._nodes.get(path)
-                if node is None or node.expanded or node.ended or not self._node_relevant_locked(node):
+                if (
+                    node is None
+                    or node.expanded
+                    or node.ended
+                    or not self._node_relevant_locked(node)
+                ):
                     return True
                 self._computing = True
             else:

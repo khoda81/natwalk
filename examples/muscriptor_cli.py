@@ -419,7 +419,9 @@ def render_screen(
         print(f"0–{explorer.choices - 1}: choose exact bucket    Space: accept suggestion")
     print("↑/↓ browse    ←/→ collapse/expand    [/]: budget    d: debug    q: quit")
     if state.lo != 0.0 or state.hi != 1.0:
-        print(dim("Space is an explicit accept: it resets the currently narrowed arithmetic range."))
+        print(
+            dim("Space is an explicit accept: it resets the currently narrowed arithmetic range.")
+        )
 
     return all_entries, selected_key
 
