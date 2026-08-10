@@ -278,6 +278,17 @@ def entry_key(entry: TreeEntry) -> tuple[tuple[int, ...], bool]:
     return entry.path, entry.is_ellipsis
 
 
+def entry_parent(entry: TreeEntry) -> tuple[int, ...]:
+    return entry.path if entry.is_ellipsis else entry.path[:-1]
+
+
+def last_children(entries: Sequence[TreeEntry]) -> dict[tuple[int, ...], tuple[tuple[int, ...], bool]]:
+    last: dict[tuple[int, ...], tuple[tuple[int, ...], bool]] = {}
+    for entry in entries:
+        last[entry_parent(entry)] = entry_key(entry)
+    return last
+
+
 def suggestion_prefixes(suggestion: GreedySuggestion) -> set[tuple[int, ...]]:
     return {tuple(suggestion.tokens[:i]) for i in range(1, len(suggestion.tokens) + 1)}
 
@@ -289,21 +300,31 @@ def render_tree_line(
     selected: bool,
     highlighted: bool,
     collapsed: bool,
+    last_by_parent: dict[tuple[int, ...], tuple[tuple[int, ...], bool]],
     width: int,
 ) -> str:
-    indent = "│  " * max(0, entry.depth)
+    guides: list[str] = []
+    for depth in range(entry.depth):
+        ancestor_path = entry.path[: depth + 1]
+        ancestor_key = (ancestor_path, False)
+        ancestor_parent = ancestor_path[:-1]
+        guides.append("    " if last_by_parent.get(ancestor_parent) == ancestor_key else "│   ")
+
+    parent = entry_parent(entry)
+    connector = "└── " if last_by_parent.get(parent) == entry_key(entry) else "├── "
     marker = "▶ " if highlighted else "  "
     select_marker = "❯ " if selected else "  "
 
     if entry.is_ellipsis:
         label = f"…  +{entry.hidden_count} hidden"
-        body = f"{indent}└─ {label}"
     else:
-        branch = "▸" if collapsed else ("┬" if entry.expanded else "─")
         label = ctx.describe(entry.token) if entry.token is not None else "."
-        body = f"{indent}├{branch} {label}"
+        if collapsed:
+            label = f"▸ {label}"
 
-    suffix = f"{entry.hidden_nats if entry.is_ellipsis else entry.edge_nats:7.3f} nat"
+    body = f"{''.join(guides)}{connector}{label}"
+    cost = max(0.0, entry.hidden_nats if entry.is_ellipsis else entry.edge_nats)
+    suffix = f"{cost:7.3f} nat"
     room = max(1, width - len(select_marker) - len(marker) - len(suffix) - 1)
     if len(body) > room:
         body = body[: max(1, room - 1)] + "…"
@@ -330,6 +351,7 @@ def render_screen(
     stats = explorer.stats()
     suggestion = explorer.cached_greedy_suggestion(max_bits=budget_bits)
     all_entries = collapse_entries(explorer.tree_entries(), collapsed)
+    last_by_parent = last_children(all_entries)
     highlights = suggestion_prefixes(suggestion)
 
     if selected_key is None and all_entries:
@@ -406,6 +428,7 @@ def render_screen(
                     selected=key == selected_key,
                     highlighted=(not entry.is_ellipsis and entry.path in highlights),
                     collapsed=entry.path in collapsed,
+                    last_by_parent=last_by_parent,
                     width=width,
                 )
             )
