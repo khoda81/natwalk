@@ -2,17 +2,19 @@
 
 The model tree is searched in information distance (Dijkstra / uniform-cost
 search). Tree browsing never commits probability mass. Binary/K-ary digits
-narrow the exact arithmetic interval; Space explicitly accepts a model-greedy
-continuation up to an adjustable bit budget.
+narrow the exact arithmetic interval; Space explicitly accepts a highlighted
+continuation inside an adjustable nat budget.
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import math
 import select
 import shutil
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -22,7 +24,14 @@ import torch.nn.functional as F
 from muscriptor import TranscriptionModel
 from muscriptor.modules.streaming import increment_steps, init_states
 
-from natwalk import GreedySuggestion, Navigator, TokenTreeExplorer, TreeEntry
+from natwalk import (
+    GreedySuggestion,
+    Navigator,
+    TokenTreeExplorer,
+    TreeEntry,
+    accept_completion,
+    cached_budget_completions,
+)
 
 VALID_CARD = 1393
 SAMPLE_RATE = 16_000
@@ -124,7 +133,7 @@ class MuscriptorContext:
         if kind == "tie":
             return "tie"
         if kind == "program":
-            return f"program({self.tm._instrument_for_program(value)})"
+            return self.tm._instrument_for_program(value)
         if kind == "drum":
             return f"drum({midi_name(value)})"
         return f"{kind}({value})"
@@ -342,16 +351,37 @@ def render_screen(
     explorer: TokenTreeExplorer,
     ctx: MuscriptorContext,
     *,
-    budget_bits: float,
+    budget_nats: float,
+    suggestion_index: int,
     selected_key: tuple[tuple[int, ...], bool] | None,
     collapsed: set[tuple[int, ...]],
     tree_lines: int,
+    max_tokens: int,
     debug: bool,
-) -> tuple[list[TreeEntry], tuple[tuple[int, ...], bool] | None]:
+) -> tuple[
+    list[TreeEntry],
+    tuple[tuple[int, ...], bool] | None,
+    tuple[GreedySuggestion, ...],
+    int,
+]:
     clear()
     state = explorer.snapshot
     stats = explorer.stats()
-    suggestion = explorer.cached_greedy_suggestion(max_bits=budget_bits)
+    suggestions = cached_budget_completions(
+        explorer,
+        max_nats=budget_nats,
+        max_tokens=max_tokens,
+    )
+    if suggestions:
+        suggestion_index %= len(suggestions)
+        suggestion = suggestions[suggestion_index]
+    else:
+        suggestion_index = 0
+        suggestion = explorer.cached_greedy_suggestion(
+            max_bits=budget_nats / math.log(2),
+            max_tokens=max_tokens,
+        )
+
     all_entries = collapse_entries(explorer.tree_entries(), collapsed)
     last_by_parent = last_children(all_entries)
     highlights = suggestion_prefixes(suggestion)
@@ -369,24 +399,28 @@ def render_screen(
 
     print("natwalk · MuScriptor")
     print("=" * 78)
-    print(f"Budget: {budget_bits:.2f} bit    binary action: {explorer.bits_per_action:.2f} bit")
+    print(
+        f"Budget: {budget_nats:.2f} nat ({budget_nats / math.log(2):.2f} bit)    "
+        f"binary action: {explorer.nats_per_action:.3f} nat = {explorer.bits_per_action:.2f} bit"
+    )
     print()
     print("Committed:")
     print(fmt_tokens(ctx, state.prefix, limit=18))
 
     if suggestion.tokens:
         tail = " · …" if not suggestion.complete else ""
+        ordinal = f" {suggestion_index + 1}/{len(suggestions)}" if suggestions else ""
         print()
         print(
-            f"Suggestion [{suggestion.bits:.3f}/{budget_bits:.2f} bit]"
+            f"Suggestion{ordinal} [{suggestion.nats:.3f}/{budget_nats:.2f} nat]"
             f"{'  ⟳' if not suggestion.complete else ''}:"
         )
         print(bold(fmt_tokens(ctx, suggestion.tokens, limit=18) + tail))
-    elif suggestion.complete and suggestion.next_token_bits is not None:
+    elif suggestion.complete and suggestion.next_token_nats is not None:
         print()
         print(
-            f"Suggestion: —   next greedy token costs {suggestion.next_token_bits:.3f} bit "
-            f"(budget {budget_bits:.2f})"
+            f"Suggestion: —   next greedy token costs {suggestion.next_token_nats:.3f} nat "
+            f"(budget {budget_nats:.2f})"
         )
     else:
         print()
@@ -404,7 +438,7 @@ def render_screen(
     if debug:
         print(
             f"range=[{state.lo:.9f}, {state.hi:.9f}) · "
-            f"binary={explorer.supplied_bits:.3f} bit · "
+            f"binary={explorer.supplied_nats:.3f} nat · "
             f"path={state.path_surprisal:.3f} nat · undo={state.undo_depth}"
         )
 
@@ -442,13 +476,28 @@ def render_screen(
         print("0 / 1: choose exact half    Space: accept suggestion    Backspace: undo")
     else:
         print(f"0–{explorer.choices - 1}: choose exact bucket    Space: accept suggestion")
-    print("↑/↓ browse    ←/→ collapse/expand    [/]: budget    d: debug    q: quit")
+    print("Tab/Shift-Tab: suggestion    [/]: ± budget nat    d: debug    q: quit")
+    print("↑/↓ browse tree    ←/→ collapse/expand")
     if state.lo != 0.0 or state.hi != 1.0:
         print(
             dim("Space is an explicit accept: it resets the currently narrowed arithmetic range.")
         )
 
-    return all_entries, selected_key
+    return all_entries, selected_key, suggestions, suggestion_index
+
+
+def _decode_escape_sequence(seq: str) -> str:
+    if seq == "\x1b[Z":
+        return "BACKTAB"
+    if not (seq.startswith("\x1b[") or seq.startswith("\x1bO")):
+        return "ESC"
+    return {
+        "A": "UP",
+        "B": "DOWN",
+        "C": "RIGHT",
+        "D": "LEFT",
+        "Z": "BACKTAB",
+    }.get(seq[-1], "ESC")
 
 
 def read_key(timeout: float = 0.20) -> str | None:
@@ -468,21 +517,27 @@ def read_key(timeout: float = 0.20) -> str | None:
         ch = sys.stdin.read(1)
         if ch == "\x03":
             raise KeyboardInterrupt
+        if ch == "\t":
+            return "TAB"
         if ch != "\x1b":
             return ch
 
         seq = ch
-        for _ in range(2):
-            ready, _, _ = select.select([sys.stdin], [], [], 0.01)
+        deadline = time.monotonic() + 0.05
+        while len(seq) < 16:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([sys.stdin], [], [], remaining)
             if not ready:
                 break
-            seq += sys.stdin.read(1)
-        return {
-            "\x1b[A": "UP",
-            "\x1b[B": "DOWN",
-            "\x1b[C": "RIGHT",
-            "\x1b[D": "LEFT",
-        }.get(seq, "ESC")
+            next_char = sys.stdin.read(1)
+            seq += next_char
+            if next_char == "~":
+                break
+            if len(seq) >= 3 and next_char in "ABCDZ":
+                break
+        return _decode_escape_sequence(seq)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -502,12 +557,17 @@ def main() -> None:
         help="materialized token-tree node cap; 0 means unlimited",
     )
     ap.add_argument("--tree-lines", type=int, default=16)
-    ap.add_argument("--budget-bits", type=float, default=2.0)
-    ap.add_argument("--budget-step", type=float, default=0.5)
+    ap.add_argument("--budget-nats", type=float, default=1.5)
+    ap.add_argument(
+        "--budget-step",
+        type=float,
+        default=0.25,
+        help="linear nat increment used by [ and ]",
+    )
     args = ap.parse_args()
 
-    if args.budget_bits < 0:
-        ap.error("--budget-bits must be >= 0")
+    if args.budget_nats < 0:
+        ap.error("--budget-nats must be >= 0")
     if args.budget_step <= 0:
         ap.error("--budget-step must be > 0")
 
@@ -521,7 +581,8 @@ def main() -> None:
     ctx = MuscriptorContext(tm, args.audio, chunk_index=args.chunk, max_tokens=args.max_tokens)
     nav = Navigator(ctx.new_cursor(), choices=args.choices)
 
-    budget_bits = args.budget_bits
+    budget_nats = args.budget_nats
+    suggestion_index = 0
     selected_key: tuple[tuple[int, ...], bool] | None = None
     collapsed: set[tuple[int, ...]] = set()
     debug = False
@@ -529,13 +590,15 @@ def main() -> None:
     try:
         with TokenTreeExplorer(nav, max_nodes=args.tree_nodes) as explorer:
             while True:
-                entries, selected_key = render_screen(
+                entries, selected_key, suggestions, suggestion_index = render_screen(
                     explorer,
                     ctx,
-                    budget_bits=budget_bits,
+                    budget_nats=budget_nats,
+                    suggestion_index=suggestion_index,
                     selected_key=selected_key,
                     collapsed=collapsed,
                     tree_lines=args.tree_lines,
+                    max_tokens=args.max_tokens,
                     debug=debug,
                 )
                 if explorer.snapshot.ended:
@@ -551,28 +614,50 @@ def main() -> None:
                     continue
 
                 if key == "[":
-                    budget_bits = max(0.0, budget_bits - args.budget_step)
+                    budget_nats = max(0.0, budget_nats - args.budget_step)
+                    suggestion_index = 0
                     continue
                 if key == "]":
-                    budget_bits += args.budget_step
+                    budget_nats += args.budget_step
+                    suggestion_index = 0
+                    continue
+
+                if key == "TAB":
+                    if suggestions:
+                        suggestion_index = (suggestion_index + 1) % len(suggestions)
+                    continue
+                if key == "BACKTAB":
+                    if suggestions:
+                        suggestion_index = (suggestion_index - 1) % len(suggestions)
                     continue
 
                 if key in ("\x7f", "\b"):
                     if explorer.undo():
+                        suggestion_index = 0
                         selected_key = None
                         collapsed.clear()
                     continue
 
                 if key in (" ", "\r", "\n"):
-                    explorer.accept_greedy(max_bits=budget_bits, max_tokens=args.max_tokens)
-                    selected_key = None
-                    collapsed.clear()
+                    if suggestions:
+                        suggestion = suggestions[suggestion_index % len(suggestions)]
+                    else:
+                        suggestion = explorer.cached_greedy_suggestion(
+                            max_bits=budget_nats / math.log(2),
+                            max_tokens=args.max_tokens,
+                        )
+                    if suggestion.tokens:
+                        accept_completion(explorer, suggestion.tokens)
+                        suggestion_index = 0
+                        selected_key = None
+                        collapsed.clear()
                     continue
 
                 if key.isdigit():
                     bucket = int(key)
                     if 0 <= bucket < explorer.choices:
                         explorer.choose(bucket)
+                        suggestion_index = 0
                         selected_key = None
                         collapsed.clear()
                     continue
@@ -608,8 +693,9 @@ def main() -> None:
         state = nav.snapshot()
         print()
         print(
-            f"final: binary_actions={state.actions}, binary={nav.supplied_bits:.6f} bit, "
-            f"committed_tokens={len(state.prefix)}, path_surprisal={state.path_surprisal:.6f} nat"
+            f"final: binary_actions={state.actions}, binary={nav.supplied_nats:.6f} nat "
+            f"({nav.supplied_bits:.6f} bit), committed_tokens={len(state.prefix)}, "
+            f"path_surprisal={state.path_surprisal:.6f} nat"
         )
 
 
