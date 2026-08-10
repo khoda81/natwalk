@@ -182,9 +182,7 @@ class TokenTreeExplorerTests(unittest.TestCase):
         explorer.step()
         explorer.step()
 
-        root_ellipsis = next(
-            e for e in explorer.tree_entries() if e.is_ellipsis and e.depth == 0
-        )
+        root_ellipsis = next(e for e in explorer.tree_entries() if e.is_ellipsis and e.depth == 0)
         self.assertEqual(root_ellipsis.hidden_count, 1)
         self.assertAlmostEqual(root_ellipsis.hidden_nats, -math.log(0.2), places=12)
 
