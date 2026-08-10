@@ -15,6 +15,8 @@ local checkout containing this script.
 from __future__ import annotations
 
 import contextlib
+import os
+import select
 import sys
 import termios
 import tty
@@ -81,6 +83,72 @@ def terminal_session() -> Iterator[None]:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         sys.stdout.write("\033[?25h\033[?1049l")
         sys.stdout.flush()
+
+
+# Bytes that belong to later key events must never be consumed while parsing
+# the current event. This matters when rendering is slow and several escape
+# sequences have accumulated in the terminal input queue.
+_pending_input = bytearray()
+
+
+def _read_byte(fd: int, timeout: float) -> bytes | None:
+    if _pending_input:
+        return bytes((_pending_input.pop(0),))
+    ready, _, _ = select.select([fd], [], [], timeout)
+    if not ready:
+        return None
+    data = os.read(fd, 1)
+    return data or None
+
+
+def _read_escape(fd: int) -> str:
+    """Consume exactly one ANSI escape sequence, never the following key."""
+    seq = bytearray(b"\x1b")
+    second = _read_byte(fd, 0.05)
+    if second is None:
+        return "ESC"
+    seq.extend(second)
+
+    # A bare Escape immediately followed by an ordinary key is two events for
+    # this UI. Put the ordinary byte back rather than accidentally eating it.
+    if second not in {b"[", b"O"}:
+        _pending_input[:0] = second
+        return "ESC"
+
+    # CSI/SS3 sequences end at the first ANSI final byte (0x40..0x7e). Read
+    # one byte at a time: a bulk os.read() can contain several queued arrows
+    # after a slow render and would collapse all of them into one event.
+    for _ in range(30):
+        byte = _read_byte(fd, 0.05)
+        if byte is None:
+            break
+        seq.extend(byte)
+        if 0x40 <= byte[0] <= 0x7E:
+            break
+
+    text = bytes(seq).decode("ascii", errors="ignore")
+    return compact._navigation_override(compact.cli._decode_escape_sequence(text))
+
+
+def read_key(timeout: float = 0.20) -> str | None:
+    """Read exactly one queued terminal event without dropping later events."""
+    if not sys.stdin.isatty():
+        return input("> ").strip()[:1]
+
+    fd = sys.stdin.fileno()
+    first = _read_byte(fd, timeout)
+    if first is None:
+        return None
+    if first == b"\x03":
+        raise KeyboardInterrupt
+    if first == b"\t":
+        return "TAB"
+    if first == b"\x1b":
+        return _read_escape(fd)
+    return first.decode("utf-8", errors="ignore")
+
+
+compact.cli.read_key = read_key
 
 
 def _default_auto_tree_height() -> None:
