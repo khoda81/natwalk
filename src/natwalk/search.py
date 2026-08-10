@@ -44,7 +44,7 @@ class Search:
             raise RuntimeError("frontier parent is unexpectedly unexpanded")
         if rank >= len(distribution):
             return
-        path_nats = parent.path_nats + distribution.nats[rank]
+        path_nats = parent.path_nats + distribution.nats(rank)
         if not math.isfinite(path_nats):
             return
         heapq.heappush(
@@ -74,12 +74,8 @@ class Search:
             return None
 
         candidate = heapq.heappop(self.frontier)
-
-        # Advance the parent's sorted sibling stream.
         self._push(candidate.parent, candidate.rank + 1)
 
-        # Materialize and expand the popped child. ``Tree.child`` is idempotent,
-        # so other read-only consumers may have already allocated the node.
         child = self.tree.child(candidate.parent, candidate.rank)
         self._expand(child)
         self._push(child, 0)
