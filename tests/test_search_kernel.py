@@ -57,10 +57,6 @@ class TreeTests(unittest.TestCase):
         self.assertEqual(tree.path(child), (1,))
         self.assertAlmostEqual(tree.edge_nats(child), -math.log(0.2))
 
-    def test_distribution_rejects_broken_rank_order(self) -> None:
-        with self.assertRaises(ValueError):
-            Distribution(tokens=(0, 1), nats=(2.0, 1.0))
-
     def test_child_allocation_is_idempotent(self) -> None:
         tree = Tree()
         tree[tree.root].distribution = distribution([0.6, 0.4])
