@@ -135,7 +135,11 @@ class TokenDisplay:
 
 
 def load_model(args: argparse.Namespace) -> tuple[Llama, Path]:
-    path = Path(args.model_path).expanduser() if args.model_path else resolve_ollama_gguf(args.model)
+    path = (
+        Path(args.model_path).expanduser()
+        if args.model_path
+        else resolve_ollama_gguf(args.model)
+    )
     print(f"Loading {path} …", file=sys.stderr)
     kwargs: dict[str, object] = {
         "model_path": str(path),
