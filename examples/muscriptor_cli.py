@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """MuScriptor demo backend for natwalk.
 
 This adapter intentionally uses MuScriptor private APIs because natwalk needs the
