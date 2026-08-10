@@ -61,6 +61,78 @@ compact._normal_ellipsis = _bare_normal_ellipsis
 compact._deviation_ellipsis = _bare_deviation_ellipsis
 
 
+# Probability is encoded as luminance. A literal linear p -> brightness mapping
+# would make almost every child of a large softmax invisible, so use a gentle
+# fourth-root transfer: brightness ~ p**0.25 with a small readable floor.
+def _probability_intensity(cost_nats: float) -> float:
+    if not math.isfinite(cost_nats):
+        return 0.16
+    probability = math.exp(-max(0.0, cost_nats))
+    return 0.16 + 0.84 * probability**0.25
+
+
+def _scale_rgb(rgb: tuple[int, int, int], intensity: float) -> tuple[int, int, int]:
+    return tuple(round(channel * intensity) for channel in rgb)
+
+
+def _rgb(text: str, rgb: tuple[int, int, int]) -> str:
+    red, green, blue = rgb
+    return f"\033[38;2;{red};{green};{blue}m{text}\033[0m"
+
+
+def _probability_render_row(
+    row: compact._DisplayRow,
+    *,
+    selected: bool,
+    collapsed: bool,
+    width: int,
+) -> str:
+    """Render probability as row luminance while keeping cursor glyphs vivid."""
+    guides = "".join("    " if last else "│   " for last in row.ancestor_last)
+    connector = "└── " if row.is_last else "├── "
+    highlighted = row.node.highlighted
+    suggestion_marker = "▶ " if highlighted else "  "
+    select_marker = "❯ " if selected else "  "
+
+    label = row.node.label
+    if collapsed and not row.node.is_ellipsis:
+        label = f"▸ {label}"
+    elif len(row.node.corridor_paths) > 1:
+        label = f"{label}  ▸"
+
+    body = f"{guides}{connector}{label}"
+    suffix = f"{max(0.0, row.node.cost_nats):7.3f} nat"
+    room = max(1, width - len(select_marker) - len(suggestion_marker) - len(suffix) - 1)
+    if len(body) > room:
+        body = body[: max(1, room - 1)] + "…"
+    payload = f"{body:<{room}} {suffix}"
+
+    if not compact.cli.sys.stdout.isatty():
+        return f"{select_marker}{suggestion_marker}{payload}"
+
+    intensity = _probability_intensity(row.node.cost_nats)
+    if selected and highlighted:
+        base = (255, 120, 255)
+    elif selected:
+        base = (255, 220, 80)
+    elif highlighted:
+        base = (80, 220, 255)
+    else:
+        base = (245, 245, 245)
+
+    # Selection/navigation markers remain fully saturated so an improbable row
+    # never hides the user's location. The row itself carries probability.
+    if selected:
+        select_marker = _rgb(select_marker, (255, 220, 80))
+    if highlighted:
+        suggestion_marker = _rgb(suggestion_marker, (80, 220, 255))
+    payload = _rgb(payload, _scale_rgb(base, intensity))
+    return f"{select_marker}{suggestion_marker}{payload}"
+
+
+compact._render_row = _probability_render_row
+
+
 # Inspection is deliberately separate from Dijkstra. The search worker decides
 # what model prefixes deserve compute; the yellow cursor chooses which already-
 # known conditional distribution the human wants to inspect.
