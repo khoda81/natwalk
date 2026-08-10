@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import bisect
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Protocol
 
 
 class Cursor(Protocol):
@@ -18,7 +19,7 @@ class Cursor(Protocol):
     prefix: tuple[int, ...]
     ended: bool
 
-    def clone(self) -> "Cursor": ...
+    def clone(self) -> Cursor: ...
 
     def predict(self) -> Sequence[float]: ...
 
@@ -35,7 +36,7 @@ class State:
     actions: int = 0
     path_surprisal: float = 0.0
 
-    def clone(self) -> "State":
+    def clone(self) -> State:
         return State(
             cursor=self.cursor.clone(),
             lo=self.lo,

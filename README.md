@@ -99,7 +99,7 @@ from natwalk import Navigator
 nav = Navigator(cursor, choices=5)
 
 preview = nav.preview(0)  # does not mutate state
-forced = nav.choose(0)    # exactly ln(5) nats of user information
+forced = nav.choose(0)  # exactly ln(5) nats of user information
 ```
 
 `predict()` must expose the **complete normalized distribution**. natwalk deliberately has no top-k or top-p approximation in its core semantics.

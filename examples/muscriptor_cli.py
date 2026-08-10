@@ -11,14 +11,15 @@ from __future__ import annotations
 import argparse
 import copy
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import torch
 import torch.nn.functional as F
-
 from muscriptor import TranscriptionModel
 from muscriptor.modules.streaming import increment_steps, init_states
+
 from natwalk import Navigator
 
 VALID_CARD = 1393
@@ -61,8 +62,7 @@ class MuscriptorContext:
         start = chunk_index * CHUNK_SAMPLES
         if start >= wav.shape[-1]:
             raise ValueError(
-                f"chunk {chunk_index} starts after audio ends "
-                f"({wav.shape[-1] / SAMPLE_RATE:.2f}s)"
+                f"chunk {chunk_index} starts after audio ends ({wav.shape[-1] / SAMPLE_RATE:.2f}s)"
             )
         chunk = wav[:, start : start + CHUNK_SAMPLES]
         if chunk.shape[-1] < CHUNK_SAMPLES:
@@ -73,7 +73,7 @@ class MuscriptorContext:
         self.cfg_conditions = self.lm.condition_provider(prepared)
         self.prepend_length = sum(cond.shape[1] for cond, _ in self.cfg_conditions.values())
 
-    def new_cursor(self) -> "MuscriptorCursor":
+    def new_cursor(self) -> MuscriptorCursor:
         return MuscriptorCursor(self)
 
     def describe(self, token: int) -> str:
@@ -114,7 +114,7 @@ class MuscriptorCursor:
         self.first_step = True
         self._probs: torch.Tensor | None = None
 
-    def clone(self) -> "MuscriptorCursor":
+    def clone(self) -> MuscriptorCursor:
         self.predict()
         other = object.__new__(MuscriptorCursor)
         other.ctx = self.ctx
@@ -268,12 +268,8 @@ def main() -> None:
         f"({args.chunk * CHUNK_SECONDS:.1f}–{(args.chunk + 1) * CHUNK_SECONDS:.1f}s) …",
         file=sys.stderr,
     )
-    ctx = MuscriptorContext(
-        tm, args.audio, chunk_index=args.chunk, max_tokens=args.max_tokens
-    )
-    nav = Navigator(
-        ctx.new_cursor(), choices=args.choices, preview_tokens=args.preview_tokens
-    )
+    ctx = MuscriptorContext(tm, args.audio, chunk_index=args.chunk, max_tokens=args.max_tokens)
+    nav = Navigator(ctx.new_cursor(), choices=args.choices, preview_tokens=args.preview_tokens)
 
     try:
         while True:
