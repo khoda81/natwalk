@@ -59,6 +59,23 @@ class WorkerTests(unittest.TestCase):
                 search.reset(tree.root)
             self.assertTrue(expanded.wait(1.0))
 
+    def test_worker_failure_is_raised_in_foreground(self) -> None:
+        failed = threading.Event()
+
+        def evaluate(tree: Tree, node: int) -> Distribution:
+            if node == tree.root:
+                return distribution(1.0)
+            failed.set()
+            raise ValueError("model exploded")
+
+        tree = Tree()
+        search = Search(tree, evaluate)
+        with SearchWorker(search) as worker:
+            self.assertTrue(failed.wait(1.0))
+            with self.assertRaisesRegex(ValueError, "model exploded"):
+                with worker.access():
+                    pass
+
 
 if __name__ == "__main__":
     unittest.main()
