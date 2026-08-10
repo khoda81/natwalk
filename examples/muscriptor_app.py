@@ -15,6 +15,7 @@ local checkout containing this script.
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import select
 import sys
@@ -58,6 +59,141 @@ def _bare_deviation_ellipsis(
 
 compact._normal_ellipsis = _bare_normal_ellipsis
 compact._deviation_ellipsis = _bare_deviation_ellipsis
+
+
+def _focused_tree_entries(
+    explorer: compact.cli.TokenTreeExplorer,
+) -> tuple[compact.cli.TreeEntry, ...]:
+    """Render Dijkstra state cheaply, but fully expose the focused distribution.
+
+    Dijkstra materializes children lazily. The UI does not have to: every
+    expanded node already stores its complete ranked next-token distribution.
+    The currently inspected node therefore exposes every child as a virtual
+    TreeEntry without consuming the Dijkstra node budget.
+
+    The ordinary residual calculation has a fast path for the common case
+    where the arithmetic interval covers the whole node. Instead of scanning
+    the complete vocabulary for every expanded node on every frame, residual
+    mass is simply one minus the already-materialized child mass.
+    """
+    selected = compact._selected_node
+
+    with explorer._condition:  # noqa: SLF001 - example view over explorer cache
+        explorer._raise_worker_error_locked()  # noqa: SLF001
+        active_lo, active_hi = explorer._active_interval_locked()  # noqa: SLF001
+        nodes = explorer._nodes  # noqa: SLF001
+
+        if selected is None:
+            focus_path: tuple[int, ...] = ()
+        elif selected.is_ellipsis:
+            # An ellipsis represents hidden children of this exact parent.
+            focus_path = selected.representative.path
+        else:
+            candidate = selected.representative.path
+            # A virtual child is not a Dijkstra node. Keep its parent expanded
+            # so the selected virtual row remains scrollable rather than
+            # disappearing on the next refresh.
+            focus_path = candidate if candidate in nodes else candidate[:-1]
+
+        children: dict[tuple[int, ...], list[object]] = {}
+        for node in nodes.values():
+            if node.parent is None:
+                continue
+            if explorer._intersection(node.lo, node.hi, active_lo, active_hi) <= 0:  # noqa: SLF001
+                continue
+            children.setdefault(node.parent, []).append(node)
+        for siblings in children.values():
+            siblings.sort(key=lambda node: node.rank)
+
+        entries: list[compact.cli.TreeEntry] = []
+
+        def append_actual(node: object, depth: int) -> None:
+            entries.append(
+                compact.cli.TreeEntry(
+                    path=node.path,
+                    depth=depth,
+                    token=node.token,
+                    edge_nats=node.edge_nats,
+                    path_nats=node.path_nats,
+                    expanded=node.expanded,
+                )
+            )
+
+        def hidden_summary(parent: object) -> tuple[int, float]:
+            ranked = parent.ranked
+            if ranked is None:
+                return 0, 0.0
+
+            # Full coverage is overwhelmingly the common case before an
+            # arithmetic digit narrows the interval. This makes the residual
+            # O(number of materialized siblings), not O(vocabulary).
+            if active_lo <= parent.lo and parent.hi <= active_hi:
+                hidden_count = len(ranked.tokens) - len(parent.materialized_ranks)
+                materialized_mass = math.fsum(
+                    ranked.probabilities[rank] for rank in parent.materialized_ranks
+                )
+                return hidden_count, max(0.0, 1.0 - materialized_mass)
+
+            # Narrowed arithmetic regions are uncommon and can use the exact
+            # core fallback until this optimization moves into TokenTreeExplorer.
+            return explorer._hidden_summary_locked(parent)  # noqa: SLF001
+
+        def visit(parent_path: tuple[int, ...], depth: int) -> None:
+            parent = nodes.get(parent_path)
+            ranked = None if parent is None else parent.ranked
+
+            if parent_path == focus_path and ranked is not None:
+                actual_by_rank = {node.rank: node for node in children.get(parent_path, [])}
+                for rank, token in enumerate(ranked.tokens):
+                    actual = actual_by_rank.get(rank)
+                    if actual is not None:
+                        append_actual(actual, depth)
+                        visit(actual.path, depth + 1)
+                        continue
+
+                    probability = ranked.probabilities[rank]
+                    edge_nats = -math.log(probability) if probability > 0.0 else math.inf
+                    path_nats = parent.path_nats + edge_nats
+                    entries.append(
+                        compact.cli.TreeEntry(
+                            path=(*parent_path, token),
+                            depth=depth,
+                            token=token,
+                            edge_nats=edge_nats,
+                            path_nats=path_nats,
+                            expanded=False,
+                        )
+                    )
+                return
+
+            for child in children.get(parent_path, []):
+                append_actual(child, depth)
+                visit(child.path, depth + 1)
+
+            if parent is not None and parent.expanded:
+                hidden_count, hidden_mass = hidden_summary(parent)
+                if hidden_count and hidden_mass > 0.0:
+                    entries.append(
+                        compact.cli.TreeEntry(
+                            path=parent_path,
+                            depth=depth,
+                            token=None,
+                            edge_nats=0.0,
+                            path_nats=parent.path_nats,
+                            expanded=False,
+                            is_ellipsis=True,
+                            hidden_count=hidden_count,
+                            hidden_nats=-math.log(hidden_mass),
+                        )
+                    )
+
+        visit((), 0)
+        return tuple(entries)
+
+
+# This is intentionally a view-layer override for now. It keeps the generic
+# explorer API small while we iterate on what "inspection" should mean.
+compact.cli.TokenTreeExplorer.tree_entries = _focused_tree_entries
 
 
 @contextlib.contextmanager
