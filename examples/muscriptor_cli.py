@@ -282,7 +282,9 @@ def entry_parent(entry: TreeEntry) -> tuple[int, ...]:
     return entry.path if entry.is_ellipsis else entry.path[:-1]
 
 
-def last_children(entries: Sequence[TreeEntry]) -> dict[tuple[int, ...], tuple[tuple[int, ...], bool]]:
+def last_children(
+    entries: Sequence[TreeEntry],
+) -> dict[tuple[int, ...], tuple[tuple[int, ...], bool]]:
     last: dict[tuple[int, ...], tuple[tuple[int, ...], bool]] = {}
     for entry in entries:
         last[entry_parent(entry)] = entry_key(entry)
