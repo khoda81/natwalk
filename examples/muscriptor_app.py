@@ -61,6 +61,13 @@ compact._normal_ellipsis = _bare_normal_ellipsis
 compact._deviation_ellipsis = _bare_deviation_ellipsis
 
 
+# Inspection is deliberately separate from Dijkstra. The search worker decides
+# what model prefixes deserve compute; the yellow cursor chooses which already-
+# known conditional distribution the human wants to inspect.
+_focus_path: tuple[int, ...] = ()
+_desired_selection_path: tuple[int, ...] | None = None
+
+
 def _focused_tree_entries(
     explorer: compact.cli.TokenTreeExplorer,
 ) -> tuple[compact.cli.TreeEntry, ...]:
@@ -68,32 +75,18 @@ def _focused_tree_entries(
 
     Dijkstra materializes children lazily. The UI does not have to: every
     expanded node already stores its complete ranked next-token distribution.
-    The currently inspected node therefore exposes every child as a virtual
-    TreeEntry without consuming the Dijkstra node budget.
+    The focused node therefore exposes every child as a virtual TreeEntry
+    without consuming the Dijkstra node budget.
 
     The ordinary residual calculation has a fast path for the common case
     where the arithmetic interval covers the whole node. Instead of scanning
     the complete vocabulary for every expanded node on every frame, residual
     mass is simply one minus the already-materialized child mass.
     """
-    selected = compact._selected_node
-
     with explorer._condition:  # noqa: SLF001 - example view over explorer cache
         explorer._raise_worker_error_locked()  # noqa: SLF001
         active_lo, active_hi = explorer._active_interval_locked()  # noqa: SLF001
         nodes = explorer._nodes  # noqa: SLF001
-
-        if selected is None:
-            focus_path: tuple[int, ...] = ()
-        elif selected.is_ellipsis:
-            # An ellipsis represents hidden children of this exact parent.
-            focus_path = selected.representative.path
-        else:
-            candidate = selected.representative.path
-            # A virtual child is not a Dijkstra node. Keep its parent expanded
-            # so the selected virtual row remains scrollable rather than
-            # disappearing on the next refresh.
-            focus_path = candidate if candidate in nodes else candidate[:-1]
 
         children: dict[tuple[int, ...], list[object]] = {}
         for node in nodes.values():
@@ -142,25 +135,26 @@ def _focused_tree_entries(
             parent = nodes.get(parent_path)
             ranked = None if parent is None else parent.ranked
 
-            if parent_path == focus_path and ranked is not None:
+            if parent_path == _focus_path and ranked is not None:
+                # Focus is a flat view of one complete conditional
+                # distribution. Do not recursively render each child's search
+                # subtree here; Right-arrow chooses the one to descend into.
                 actual_by_rank = {node.rank: node for node in children.get(parent_path, [])}
                 for rank, token in enumerate(ranked.tokens):
                     actual = actual_by_rank.get(rank)
                     if actual is not None:
                         append_actual(actual, depth)
-                        visit(actual.path, depth + 1)
                         continue
 
                     probability = ranked.probabilities[rank]
                     edge_nats = -math.log(probability) if probability > 0.0 else math.inf
-                    path_nats = parent.path_nats + edge_nats
                     entries.append(
                         compact.cli.TreeEntry(
                             path=(*parent_path, token),
                             depth=depth,
                             token=token,
                             edge_nats=edge_nats,
-                            path_nats=path_nats,
+                            path_nats=parent.path_nats + edge_nats,
                             expanded=False,
                         )
                     )
@@ -194,6 +188,62 @@ def _focused_tree_entries(
 # This is intentionally a view-layer override for now. It keeps the generic
 # explorer API small while we iterate on what "inspection" should mean.
 compact.cli.TokenTreeExplorer.tree_entries = _focused_tree_entries
+
+
+_base_render_screen = compact.render_screen
+
+
+def _render_screen_with_focus(*args: object, **kwargs: object):
+    """Keep the logical focus node selected when moving up/down the tree."""
+    global _desired_selection_path
+    if _desired_selection_path is not None:
+        kwargs["selected_key"] = (_desired_selection_path, False)
+        _desired_selection_path = None
+    return _base_render_screen(*args, **kwargs)
+
+
+compact.render_screen = _render_screen_with_focus
+compact.cli.render_screen = _render_screen_with_focus
+
+
+_base_navigation_override = compact._navigation_override
+
+
+def _focus_navigation(key: str) -> str:
+    """Left/Right move between conditional distributions; Up/Down browse one."""
+    global _desired_selection_path, _focus_path
+
+    if key not in {"LEFT", "RIGHT"}:
+        return _base_navigation_override(key)
+
+    selected = compact._selected_node
+    if key == "LEFT":
+        if not _focus_path:
+            return "REFRESH"
+        old_focus = _focus_path
+        _focus_path = old_focus[:-1]
+        # The node we just left is a child of the new focus, so keep the
+        # yellow cursor on it after returning to the parent distribution.
+        _desired_selection_path = old_focus
+        return "REFRESH"
+
+    if selected is None or selected.is_ellipsis:
+        return "REFRESH"
+
+    entry = selected.representative
+    # Virtual children reveal the parent's known logits but do not themselves
+    # have a cached next-token distribution yet. Dijkstra can discover them in
+    # the background; once expanded, Right descends without any model call in
+    # the renderer.
+    if not entry.expanded:
+        return "REFRESH"
+
+    _focus_path = entry.path
+    _desired_selection_path = entry.path
+    return "REFRESH"
+
+
+compact._navigation_override = _focus_navigation
 
 
 @contextlib.contextmanager
