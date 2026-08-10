@@ -21,7 +21,6 @@ packages = ["src/natwalk"]
 
 [tool.ruff]
 line-length = 100
-extend-exclude = ["examples/llm_app.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "EXE"]
