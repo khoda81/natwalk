@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -26,10 +25,10 @@ class Cursor(Protocol):
 
 
 def rank(probabilities: Sequence[float]) -> Distribution:
-    """Convert a model distribution to nat-sorted tree representation."""
+    """Convert a model distribution to probability-ranked tree representation."""
     probs = tuple(float(probability) for probability in probabilities)
     order = sorted(range(len(probs)), key=probs.__getitem__, reverse=True)
     return Distribution(
         tokens=tuple(order),
-        nats=tuple(-math.log(probs[token]) if probs[token] != 0.0 else math.inf for token in order),
+        probabilities=tuple(probs[token] for token in order),
     )
