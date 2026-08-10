@@ -49,7 +49,15 @@ def alternate_screen() -> Iterator[None]:
         sys.stdout.flush()
 
 
+def _default_auto_tree_height() -> None:
+    """Let the full-screen app use all available rows unless overridden."""
+    if any(arg == "--tree-lines" or arg.startswith("--tree-lines=") for arg in sys.argv[1:]):
+        return
+    sys.argv.extend(["--tree-lines", "0"])
+
+
 def main() -> None:
+    _default_auto_tree_height()
     with alternate_screen():
         compact.cli.main()
 
