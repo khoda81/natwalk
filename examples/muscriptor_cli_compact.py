@@ -8,6 +8,7 @@ and only replaces the tree renderer.
 from __future__ import annotations
 
 import math
+import os
 import shutil
 from dataclasses import dataclass, field
 
@@ -127,11 +128,13 @@ def _compact_tree(
         )
 
         node.children.extend(build_token(child) for child in token_children.get(current.path, []))
-        end_ellipsis = ellipsis_by_parent.get(current.path)
-        if end_ellipsis is not None:
-            node.children.append(_normal_ellipsis(end_ellipsis))
-
         merged = _deviation_ellipsis(deviations)
+        end_ellipsis = ellipsis_by_parent.get(current.path)
+        # A terminal residual is usually just "the worker has not expanded
+        # beyond this corridor yet". If the corridor already has an exact
+        # aggregate deviation row, showing both is redundant visual noise.
+        if end_ellipsis is not None and merged is None:
+            node.children.append(_normal_ellipsis(end_ellipsis))
         if merged is not None:
             node.children.append(merged)
         return node
@@ -332,7 +335,53 @@ def render_screen(
     return entries, selected_key, suggestions, suggestion_index
 
 
+def read_key(timeout: float = 0.20) -> str | None:
+    """Read one terminal key without mixing fd polling and TextIO buffering."""
+    if not cli.sys.stdin.isatty():
+        return input("> ").strip()[:1]
+
+    import termios
+    import tty
+
+    fd = cli.sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ready, _, _ = cli.select.select([fd], [], [], timeout)
+        if not ready:
+            return None
+
+        first = os.read(fd, 1)
+        if first == b"\x03":
+            raise KeyboardInterrupt
+        if first == b"\t":
+            return "TAB"
+        if first != b"\x1b":
+            return first.decode("utf-8", errors="ignore")
+
+        seq = bytearray(first)
+        deadline = cli.time.monotonic() + 0.05
+        while len(seq) < 16:
+            remaining = deadline - cli.time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = cli.select.select([fd], [], [], remaining)
+            if not ready:
+                break
+            chunk = os.read(fd, 16 - len(seq))
+            if not chunk:
+                break
+            seq.extend(chunk)
+            if seq[-1] == ord("~") or seq[-1] in b"ABCDZ":
+                break
+        text = bytes(seq).decode("ascii", errors="ignore")
+        return cli._decode_escape_sequence(text)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
 cli.render_screen = render_screen
+cli.read_key = read_key
 
 
 if __name__ == "__main__":
