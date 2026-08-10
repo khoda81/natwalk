@@ -157,7 +157,7 @@ class SearchTests(unittest.TestCase):
             search = Search(tree, table_evaluator(table))
             actual = []
             while (node := search.step()) is not None:
-                actual.append((tree.path(node), tree[node].path_nats))
+                actual.append((tree.path(node), tree.path_nats(node)))
 
             self.assertEqual(
                 [path for path, _ in actual],
