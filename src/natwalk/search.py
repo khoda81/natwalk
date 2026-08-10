@@ -35,7 +35,7 @@ class Search:
         self.evaluate = evaluate
         self.root = root
         self.frontier: list[Candidate] = []
-        self._expand(root)
+        self.reset(root)
 
     def _push(self, parent_id: NodeId, rank: int) -> None:
         parent = self.tree[parent_id]
@@ -58,10 +58,15 @@ class Search:
 
     def _expand(self, node_id: NodeId) -> None:
         node = self.tree[node_id]
-        if node.distribution is not None:
-            return
-        node.distribution = self.evaluate(self.tree, node_id)
-        self._push(node_id, 0)
+        if node.distribution is None:
+            node.distribution = self.evaluate(self.tree, node_id)
+
+    def reset(self, root: NodeId) -> None:
+        """Restart search from ``root`` without discarding discovered tree knowledge."""
+        self.root = root
+        self.frontier.clear()
+        self._expand(root)
+        self._push(root, 0)
 
     def step(self) -> NodeId | None:
         """Pop and expand the next lowest-cost concrete node."""
@@ -77,4 +82,5 @@ class Search:
         # so other read-only consumers may have already allocated the node.
         child = self.tree.child(candidate.parent, candidate.rank)
         self._expand(child)
+        self._push(child, 0)
         return child
