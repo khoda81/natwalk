@@ -33,7 +33,6 @@ class Search:
     def __init__(self, tree: Tree, evaluate: Evaluator, *, root: NodeId = 0) -> None:
         self.tree = tree
         self.evaluate = evaluate
-        self.root = root
         self.frontier: list[Candidate] = []
         self.reset(root)
 
@@ -49,11 +48,7 @@ class Search:
             return
         heapq.heappush(
             self.frontier,
-            Candidate(
-                path_nats=path_nats,
-                parent=parent_id,
-                rank=rank,
-            ),
+            Candidate(path_nats=path_nats, parent=parent_id, rank=rank),
         )
 
     def _expand(self, node_id: NodeId) -> None:
@@ -63,7 +58,6 @@ class Search:
 
     def reset(self, root: NodeId) -> None:
         """Restart search from ``root`` without discarding discovered tree knowledge."""
-        self.root = root
         self.frontier.clear()
         self._expand(root)
         self._push(root, 0)
