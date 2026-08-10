@@ -7,7 +7,6 @@ nodes are allocated only when some consumer needs a concrete subtree.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 NodeId = int
@@ -22,16 +21,6 @@ class Distribution:
 
     tokens: tuple[int, ...]
     nats: tuple[float, ...]
-
-    def __post_init__(self) -> None:
-        if len(self.tokens) != len(self.nats):
-            raise ValueError("tokens and nats must have the same length")
-        if len(set(self.tokens)) != len(self.tokens):
-            raise ValueError("tokens must be unique")
-        if any(math.isnan(cost) or cost < 0.0 for cost in self.nats):
-            raise ValueError("nats must be non-negative and not NaN")
-        if any(left > right for left, right in zip(self.nats, self.nats[1:])):
-            raise ValueError("nats must be sorted in ascending order")
 
     def __len__(self) -> int:
         return len(self.tokens)
