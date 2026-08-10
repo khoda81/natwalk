@@ -45,6 +45,13 @@ class Session:
             node.distribution = rank(self.cursor.predict())
         return node.distribution
 
+    def inspect(self, node_id: NodeId) -> Distribution:
+        """Cache one descendant distribution without changing Dijkstra scheduling."""
+        node = self.tree[node_id]
+        if node.distribution is None:
+            node.distribution = self._evaluate(self.tree, node_id)
+        return node.distribution
+
     def _evaluate(self, tree: Tree, node_id: NodeId) -> Distribution:
         self.cursor.restore(self._root_checkpoint)
         try:
