@@ -24,11 +24,7 @@ from typing import cast
 
 import numpy as np
 from llama_cpp import Llama
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-from tui import run_tui  # noqa: E402
+from natwalk.tui import run_tui
 
 
 def resolve_ollama_gguf(model: str) -> Path:
