@@ -95,12 +95,17 @@ class Tree:
         return node.path_nats - parent.path_nats
 
     def path(self, node_id: NodeId) -> tuple[int, ...]:
+        return self.path_from(self.root, node_id)
+
+    def path_from(self, ancestor: NodeId, node_id: NodeId) -> tuple[int, ...]:
+        """Return tokens from ``ancestor`` (exclusive) to ``node_id`` (inclusive)."""
         tokens: list[int] = []
         current = node_id
-        while current != self.root:
+        while current != ancestor:
+            node = self.nodes[current]
+            if node.parent is None:
+                raise ValueError("node is not a descendant of ancestor")
             tokens.append(self.token(current))
-            parent = self.nodes[current].parent
-            assert parent is not None
-            current = parent
+            current = node.parent
         tokens.reverse()
         return tuple(tokens)
