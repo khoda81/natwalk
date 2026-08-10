@@ -110,6 +110,7 @@ class Navigation:
         if not self._history:
             return False
         previous = self._history.pop()
-        self.session.restore(previous.session)
+        if self.session.root != previous.session.root:
+            self.session.restore(previous.session)
         self.state = previous.state
         return True
