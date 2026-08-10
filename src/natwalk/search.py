@@ -22,13 +22,7 @@ class Candidate:
 
 
 class Search:
-    """Uniform-cost search using one queued sibling per expanded parent.
-
-    For each expanded parent, child costs are nondecreasing by rank. Therefore
-    its children form a sorted stream. The heap stores only the head of every
-    active stream; popping ``(parent, rank)`` advances that stream to
-    ``rank + 1`` and starts the popped child's stream at rank zero.
-    """
+    """Uniform-cost search using one queued sibling per expanded parent."""
 
     def __init__(self, tree: Tree, evaluate: Evaluator, *, root: NodeId = 0) -> None:
         self.tree = tree
@@ -36,20 +30,15 @@ class Search:
         self.frontier: list[Candidate] = []
         self.reset(root)
 
-    def _push(self, parent_id: NodeId, rank: int) -> None:
-        parent = self.tree[parent_id]
-        distribution = parent.distribution
+    def _push(self, parent_id: NodeId, rank: int, parent_nats: float) -> None:
+        distribution = self.tree[parent_id].distribution
         if distribution is None:
             raise RuntimeError("frontier parent is unexpectedly unexpanded")
         if rank >= len(distribution):
             return
-        path_nats = parent.path_nats + distribution.nats(rank)
-        if not math.isfinite(path_nats):
-            return
-        heapq.heappush(
-            self.frontier,
-            Candidate(path_nats=path_nats, parent=parent_id, rank=rank),
-        )
+        path_nats = parent_nats + distribution.nats(rank)
+        if math.isfinite(path_nats):
+            heapq.heappush(self.frontier, Candidate(path_nats, parent_id, rank))
 
     def _expand(self, node_id: NodeId) -> None:
         node = self.tree[node_id]
@@ -60,7 +49,7 @@ class Search:
         """Restart search from ``root`` without discarding discovered tree knowledge."""
         self.frontier.clear()
         self._expand(root)
-        self._push(root, 0)
+        self._push(root, 0, 0.0)
 
     def step(self) -> NodeId | None:
         """Pop and expand the next lowest-cost concrete node."""
@@ -68,9 +57,12 @@ class Search:
             return None
 
         candidate = heapq.heappop(self.frontier)
-        self._push(candidate.parent, candidate.rank + 1)
+        distribution = self.tree[candidate.parent].distribution
+        assert distribution is not None
+        parent_nats = candidate.path_nats - distribution.nats(candidate.rank)
+        self._push(candidate.parent, candidate.rank + 1, parent_nats)
 
         child = self.tree.child(candidate.parent, candidate.rank)
         self._expand(child)
-        self._push(child, 0)
+        self._push(child, 0, candidate.path_nats)
         return child
