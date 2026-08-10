@@ -22,6 +22,7 @@ class _CompactNode:
     cost_nats: float
     highlighted: bool
     is_ellipsis: bool
+    corridor_paths: tuple[tuple[int, ...], ...] = ()
     children: list[_CompactNode] = field(default_factory=list)
 
 
@@ -31,6 +32,13 @@ class _DisplayRow:
     depth: int
     ancestor_last: tuple[bool, ...]
     is_last: bool
+
+
+# Compact corridors are the default view. Right-arrow can temporarily expose
+# their constituent token rows without changing the model/search tree itself.
+_expanded_corridors: set[tuple[int, ...]] = set()
+_selected_node: _CompactNode | None = None
+_collapsed_ref: set[tuple[int, ...]] | None = None
 
 
 def _normal_ellipsis(entry: cli.TreeEntry) -> _CompactNode:
@@ -99,13 +107,13 @@ def _compact_tree(
         highlighted = start.path in highlights
         deviations: list[tuple[cli.TreeEntry, cli.TreeEntry]] = []
 
-        while True:
+        while current.path not in _expanded_corridors:
             children = token_children.get(current.path, [])
             if len(children) != 1:
                 break
 
             child = children[0]
-            # Keep the suggestion boundary visible instead of bolding tokens
+            # Keep the suggestion boundary visible instead of coloring tokens
             # that lie beyond the current information budget.
             if (child.path in highlights) != highlighted:
                 break
@@ -125,6 +133,7 @@ def _compact_tree(
             cost_nats=sum(max(0.0, entry.edge_nats) for entry in corridor),
             highlighted=highlighted,
             is_ellipsis=False,
+            corridor_paths=tuple(entry.path for entry in corridor),
         )
 
         node.children.extend(build_token(child) for child in token_children.get(current.path, []))
@@ -146,7 +155,11 @@ def _compact_tree(
     return roots
 
 
-def _flatten(nodes: list[_CompactNode]) -> list[_DisplayRow]:
+def _flatten(
+    nodes: list[_CompactNode],
+    collapsed: set[tuple[int, ...]],
+) -> list[_DisplayRow]:
+    """Flatten after corridor compression, so one compact corridor is one row."""
     rows: list[_DisplayRow] = []
 
     def visit(
@@ -164,10 +177,25 @@ def _flatten(nodes: list[_CompactNode]) -> list[_DisplayRow]:
                     is_last=is_last,
                 )
             )
-            visit(node.children, depth + 1, (*ancestor_last, is_last))
+            if node.representative.path not in collapsed:
+                visit(node.children, depth + 1, (*ancestor_last, is_last))
 
     visit(nodes, 0, ())
     return rows
+
+
+def _styled(line: str, *, selected: bool, highlighted: bool, ellipsis: bool) -> str:
+    if not cli.sys.stdout.isatty():
+        return line
+    if selected and highlighted:
+        return f"\033[1;35m{line}\033[0m"  # magenta: both cursors overlap
+    if selected:
+        return f"\033[1;33m{line}\033[0m"  # yellow: inspection cursor
+    if highlighted:
+        return f"\033[1;36m{line}\033[0m"  # cyan: active completion
+    if ellipsis:
+        return cli.dim(line)
+    return line
 
 
 def _render_row(
@@ -185,6 +213,8 @@ def _render_row(
     label = row.node.label
     if collapsed and not row.node.is_ellipsis:
         label = f"▸ {label}"
+    elif len(row.node.corridor_paths) > 1:
+        label = f"{label}  ▸"
 
     body = f"{guides}{connector}{label}"
     suffix = f"{max(0.0, row.node.cost_nats):7.3f} nat"
@@ -192,12 +222,25 @@ def _render_row(
     if len(body) > room:
         body = body[: max(1, room - 1)] + "…"
     line = f"{select_marker}{marker}{body:<{room}} {suffix}"
+    return _styled(
+        line,
+        selected=selected,
+        highlighted=row.node.highlighted,
+        ellipsis=row.node.is_ellipsis,
+    )
 
-    if selected or row.node.highlighted:
-        return cli.bold(line)
-    if row.node.is_ellipsis:
-        return cli.dim(line)
-    return line
+
+def _tree_line_budget(requested: int, *, debug: bool, narrowed: bool) -> int:
+    """Fit tree rows into the current terminal; explicit values are maxima."""
+    terminal_lines = shutil.get_terminal_size((100, 30)).lines
+    # Header/footer is 16 rows in the common case, plus optional debug/range
+    # notices. Corridor compression has already happened before this budget is
+    # applied, so a many-token corridor costs exactly one screen row.
+    reserved = 16 + int(debug) + int(narrowed)
+    available = max(4, terminal_lines - reserved)
+    if requested <= 0:
+        return available
+    return min(max(4, requested), available)
 
 
 def render_screen(
@@ -217,6 +260,8 @@ def render_screen(
     tuple[cli.GreedySuggestion, ...],
     int,
 ]:
+    global _collapsed_ref, _selected_node
+
     cli.clear()
     state = explorer.snapshot
     stats = explorer.stats()
@@ -235,9 +280,9 @@ def render_screen(
             max_tokens=max_tokens,
         )
 
-    raw_entries = cli.collapse_entries(explorer.tree_entries(), collapsed)
+    raw_entries = explorer.tree_entries()
     highlights = cli.suggestion_prefixes(suggestion)
-    rows = _flatten(_compact_tree(raw_entries, ctx, highlights))
+    rows = _flatten(_compact_tree(raw_entries, ctx, highlights), collapsed)
     entries = [row.node.representative for row in rows]
 
     if selected_key is None and entries:
@@ -250,6 +295,9 @@ def render_screen(
                 break
         else:
             selected_key = cli.entry_key(entries[0])
+
+    _collapsed_ref = collapsed
+    _selected_node = rows[selected_index].node if rows else None
 
     print("natwalk · MuScriptor · compact")
     print("=" * 78)
@@ -269,7 +317,11 @@ def render_screen(
             f"Suggestion{ordinal} [{suggestion.nats:.3f}/{budget_nats:.2f} nat]"
             f"{'  ⟳' if not suggestion.complete else ''}:"
         )
-        print(cli.bold(cli.fmt_tokens(ctx, suggestion.tokens, limit=18) + tail))
+        suggestion_text = cli.fmt_tokens(ctx, suggestion.tokens, limit=18) + tail
+        if cli.sys.stdout.isatty():
+            print(f"\033[1;36m{suggestion_text}\033[0m")
+        else:
+            print(suggestion_text)
     elif suggestion.complete and suggestion.next_token_nats is not None:
         print()
         print(
@@ -301,7 +353,11 @@ def render_screen(
     if not rows:
         print("  ⟳ expanding root…")
     else:
-        line_count = max(4, tree_lines)
+        line_count = _tree_line_budget(
+            tree_lines,
+            debug=debug,
+            narrowed=state.lo != 0.0 or state.hi != 1.0,
+        )
         half = line_count // 2
         start = max(0, selected_index - half)
         start = min(start, max(0, len(rows) - line_count))
@@ -327,12 +383,45 @@ def render_screen(
         print("0 / 1: choose exact half    Space: accept suggestion    Backspace: undo")
     else:
         print(f"0–{explorer.choices - 1}: choose exact bucket    Space: accept suggestion")
-    print("Tab/Shift-Tab: suggestion    [/]: ± budget nat    d: debug    q: quit")
-    print("↑/↓ browse tree    ←/→ collapse/expand")
+    print("Tab/Shift-Tab: completion (cyan)    [/]: ± budget nat    d: debug    q: quit")
+    print("↑/↓ inspect (yellow)    ← collapse/recompact    → reopen/decompress")
     if state.lo != 0.0 or state.hi != 1.0:
         print(cli.dim("Space is an explicit accept: it resets the narrowed arithmetic range."))
 
     return entries, selected_key, suggestions, suggestion_index
+
+
+def _navigation_override(key: str) -> str:
+    """Give compact corridors meaningful left/right semantics."""
+    node = _selected_node
+    if key not in {"LEFT", "RIGHT"} or node is None:
+        return key
+    if node.is_ellipsis:
+        return "REFRESH"
+
+    path = node.representative.path
+    if key == "RIGHT":
+        # First reopen a genuinely collapsed subtree using the main CLI logic.
+        if _collapsed_ref is not None and path in _collapsed_ref:
+            return key
+        # Otherwise expose every token represented by this compact corridor.
+        if len(node.corridor_paths) > 1:
+            _expanded_corridors.update(node.corridor_paths)
+            return "REFRESH"
+        return "REFRESH"
+
+    # Left on an explicitly expanded region means "recompact from here".
+    expanded_below = {
+        expanded
+        for expanded in _expanded_corridors
+        if len(expanded) >= len(path) and expanded[: len(path)] == path
+    }
+    if expanded_below:
+        _expanded_corridors.difference_update(expanded_below)
+        return "REFRESH"
+
+    # Otherwise preserve the main CLI's ordinary subtree-collapse behavior.
+    return key
 
 
 def read_key(timeout: float = 0.20) -> str | None:
@@ -375,7 +464,7 @@ def read_key(timeout: float = 0.20) -> str | None:
             if seq[-1] == ord("~") or seq[-1] in b"ABCDZ":
                 break
         text = bytes(seq).decode("ascii", errors="ignore")
-        return cli._decode_escape_sequence(text)
+        return _navigation_override(cli._decode_escape_sequence(text))
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
