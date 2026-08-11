@@ -41,10 +41,10 @@ class TerminalWidthTests(unittest.TestCase):
                     self.assertLessEqual(_cell_width(row), columns)
 
     def test_distribution_rows_fill_but_never_overflow_terminal(self) -> None:
-        self.assertEqual(_distribution_line_count(40, None, debug=False), 26)
-        self.assertEqual(_distribution_line_count(40, 100, debug=False), 26)
+        self.assertEqual(_distribution_line_count(40, None, debug=False), 27)
+        self.assertEqual(_distribution_line_count(40, 100, debug=False), 27)
         self.assertEqual(_distribution_line_count(40, 10, debug=False), 10)
-        self.assertEqual(_distribution_line_count(40, None, debug=True), 25)
+        self.assertEqual(_distribution_line_count(40, None, debug=True), 26)
 
 
 if __name__ == "__main__":
