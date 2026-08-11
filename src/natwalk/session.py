@@ -52,6 +52,15 @@ class Session:
             node.distribution = self._evaluate(self.tree, node_id)
         return node.distribution
 
+    def inspect_child(self, parent_id: NodeId, rank_index: int) -> NodeId:
+        """Materialize and inspect one ranked child as a single Session mutation."""
+        distribution = self.inspect(parent_id)
+        if not 0 <= rank_index < len(distribution):
+            raise IndexError(rank_index)
+        child = self.tree.child(parent_id, rank_index)
+        self.inspect(child)
+        return child
+
     def _evaluate(self, tree: Tree, node_id: NodeId) -> Distribution:
         self.cursor.restore(self._root_checkpoint)
         try:
