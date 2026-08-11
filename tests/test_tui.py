@@ -64,14 +64,14 @@ class TerminalWidthTests(unittest.TestCase):
             )
             self.assertLessEqual(_cell_width(line), columns)
 
-    def test_context_wrap_keeps_suggestion_inline(self) -> None:
+    def test_context_wrap_keeps_suggestion_span_intact(self) -> None:
         lines = _wrap_spans(
             (("The interesting thing is", ""), (" that it", "7")),
             24,
             color=False,
         )
 
-        self.assertEqual(lines, ("The interesting thing is ", "that it"))
+        self.assertEqual(lines, ("The interesting thing is", " that it"))
 
     def test_context_can_render_exact_backend_text(self) -> None:
         text = _context_text(
