@@ -12,16 +12,19 @@ class PublicApiTests(unittest.TestCase):
             "Distribution",
             "Navigation",
             "NavigationState",
+            "NodeUpdate",
             "Row",
             "Search",
             "SearchWorker",
             "Session",
             "Suggestion",
             "Tree",
+            "TreeReplica",
             "View",
             "completions",
             "greedy",
             "rows",
+            "updates",
         }
         self.assertEqual(set(natwalk.__all__), expected)
         for name in expected:
