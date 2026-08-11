@@ -145,18 +145,18 @@ def _ancestor_branch_nats(
     rows: tuple[CompactRow, ...],
     branch_nats: list[float],
 ) -> tuple[tuple[float, ...], ...]:
-    """Recover the macro-edge weight represented by each visible ancestor column."""
+    """Return exact radix-ancestor weights without requiring internal rows."""
     if len(rows) != len(branch_nats):
         raise ValueError("row and branch-nat counts must match")
 
-    stack: list[float] = []
     result: list[tuple[float, ...]] = []
     for row, current_nats in zip(rows, branch_nats, strict=True):
-        if row.depth > len(stack):
-            raise ValueError("compact rows must be in depth-first order")
-        del stack[row.depth :]
-        result.append(tuple(stack))
-        stack.append(current_nats)
+        if row.ancestor_nats:
+            if len(row.ancestor_nats) != len(row.ancestor_last):
+                raise ValueError("ancestor branch-nat count must match tree depth")
+            result.append(row.ancestor_nats)
+        else:
+            result.append((current_nats,) * len(row.ancestor_last))
     return tuple(result)
 
 
@@ -334,8 +334,8 @@ def _row_display_nats(tree: Tree, root: NodeId, view: View, row: CompactRow) -> 
 
 
 def _row_branch_nats(tree: Tree, root: NodeId, display_nats: float, row: CompactRow) -> float:
-    """Surprisal of the whole macro-edge represented by one compressed row."""
-    return display_nats - tree.path_nats(row.parent, ancestor=root)
+    """Return the exact aggregate surprisal represented by this radix connector."""
+    return row.edge_nats
 
 
 def _row_token_styles(
@@ -391,7 +391,7 @@ def _format_tree_row(
     branch_nats = row.edge_nats if branch_nats is None else branch_nats
     branch_reference = branch_nats if branch_reference is None else branch_reference
     if ancestor_branch_nats is None:
-        ancestor_branch_nats = (branch_nats,) * len(row.ancestor_last)
+        ancestor_branch_nats = row.ancestor_nats or (branch_nats,) * len(row.ancestor_last)
     if len(ancestor_branch_nats) != len(row.ancestor_last):
         raise ValueError("ancestor branch-nat count must match tree depth")
 
