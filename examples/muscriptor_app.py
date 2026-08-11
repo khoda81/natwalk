@@ -199,7 +199,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk", type=int, default=0, help="5-second chunk index")
     parser.add_argument("--choices", type=int, default=2)
     parser.add_argument("--max-tokens", type=int, default=256)
-    parser.add_argument("--tree-lines", type=int, default=16)
+    parser.add_argument(
+        "--tree-lines",
+        type=int,
+        help="maximum visible distribution rows; default fills the terminal",
+    )
     parser.add_argument("--budget-nats", type=float, default=1.5)
     parser.add_argument("--budget-step", type=float, default=0.25)
     return parser.parse_args()
