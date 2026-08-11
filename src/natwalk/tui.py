@@ -27,6 +27,7 @@ _REDRAW_SECONDS = 0.25
 _SUGGESTION_STYLE = "1;38;5;45"
 _SELECTED_STYLE = "1;38;5;220"
 _FOREST_STYLE = "2;38;5;244"
+_PREDICTION_STYLE = "2"
 _VIRIDIS_GAMMA = 0.35
 _VIRIDIS_WHITE_MIX = 0.18
 _VIRIDIS = (
@@ -263,6 +264,66 @@ def _row_separator_nats(tree: Tree, view: View, row: CompactRow) -> tuple[float,
                 raise ValueError("collapsed token edge crosses an undiscovered child")
             node = child
     return tuple(result)
+
+
+def _row_preview(
+    tree: Tree,
+    view: View,
+    row: CompactRow,
+    *,
+    max_tokens: int = 64,
+) -> tuple[tuple[int, ...], tuple[float, ...], bool]:
+    """Return read-only best-known context beyond one measured row event.
+
+    Preview tokens never materialize tree state. The returned edge surprisals are
+    cumulative from the view root and belong only to the preview separators.
+    """
+    if max_tokens <= 0:
+        return (), (), False
+
+    tokens: list[int] = []
+    separator_nats: list[float] = []
+
+    if row.forest:
+        node = row.parent
+        for rank in row.ranks:
+            child = tree.child(node, rank)
+            if child is None:
+                raise ValueError("forest row prefix crosses an undiscovered edge")
+            node = child
+
+        distribution = tree[node].distribution
+        if not 0 <= row.forest_start < len(distribution):
+            raise ValueError("forest preview start is outside its parent distribution")
+        rank = row.forest_start
+        cumulative_nats = tree.path_nats(node, ancestor=view.node) + distribution.nats(rank)
+        tokens.append(distribution.tokens[rank])
+        separator_nats.append(cumulative_nats)
+        child = tree.child(node, rank)
+        if child is None:
+            return tuple(tokens), tuple(separator_nats), False
+        node = child
+    else:
+        node = row.child
+        if node is None:
+            return (), (), False
+        cumulative_nats = row.path_nats
+
+    while len(tokens) < max_tokens:
+        distribution = tree[node].distribution
+        if not distribution.tokens:
+            return tuple(tokens), tuple(separator_nats), True
+
+        rank = 0
+        cumulative_nats += distribution.nats(rank)
+        tokens.append(distribution.tokens[rank])
+        separator_nats.append(cumulative_nats)
+        child = tree.child(node, rank)
+        if child is None:
+            return tuple(tokens), tuple(separator_nats), False
+        node = child
+
+    return tuple(tokens), tuple(separator_nats), not tree[node].distribution.tokens
 
 
 def _tree_viewport(
@@ -549,6 +610,9 @@ def _format_tree_row(
     branch_column: int | None = None,
     inline_branches: tuple[int, ...] = (),
     separator_nats: tuple[float, ...] | None = None,
+    preview_tokens: tuple[int, ...] = (),
+    preview_separator_nats: tuple[float, ...] = (),
+    preview_complete: bool = True,
 ) -> str:
     display_nats = row.path_nats if display_nats is None else display_nats
     nat_reference = display_nats if nat_reference is None else nat_reference
@@ -587,6 +651,8 @@ def _format_tree_row(
         separator_nats = (branch_nats,) * expected_separators
     if len(separator_nats) != expected_separators:
         raise ValueError("separator edge-nat count must match token boundaries")
+    if len(preview_separator_nats) != len(preview_tokens):
+        raise ValueError("preview edge-nat count must match preview tokens")
 
     branch_offsets = set(inline_branches)
     label_spans: list[tuple[str, str]] = []
@@ -598,12 +664,27 @@ def _format_tree_row(
             separator = " ┬ " if index in branch_offsets else " · "
             label_spans.append((separator, separator_style))
         label_spans.append((describe(token), style))
-    if row.forest or row.open_ended:
+    if row.forest or (row.open_ended and not preview_tokens):
         if label_spans:
             separator_style = _grayscale(_relative_probability(row.path_nats, branch_reference))
             separator = " ┬ " if len(row.tokens) in branch_offsets else " · "
             label_spans.append((separator, separator_style))
         label_spans.append(("…", _FOREST_STYLE))
+
+    for token, preview_nats in zip(preview_tokens, preview_separator_nats, strict=True):
+        if label_spans:
+            separator_style = _grayscale(
+                _relative_probability(preview_nats, branch_reference)
+            )
+            label_spans.append((" · ", separator_style))
+        label_spans.append((describe(token), _PREDICTION_STYLE))
+
+    if preview_tokens and not preview_complete:
+        separator_style = _grayscale(
+            _relative_probability(preview_separator_nats[-1], branch_reference)
+        )
+        label_spans.append((" · ", separator_style))
+        label_spans.append(("…", _PREDICTION_STYLE))
 
     marker_width = _cell_width(marker)
     suffix_width = _cell_width(suffix)
@@ -878,6 +959,12 @@ def _render(
                 visible_branch_prefixes,
                 describe,
             )
+            preview_tokens, preview_separator_nats, preview_complete = _row_preview(
+                tree,
+                view,
+                row,
+                max_tokens=min(max_tokens, 64),
+            )
             frame.append(
                 _format_tree_row(
                     row,
@@ -899,6 +986,9 @@ def _render(
                         visible_branch_prefixes,
                     ),
                     separator_nats=_row_separator_nats(tree, view, row),
+                    preview_tokens=preview_tokens,
+                    preview_separator_nats=preview_separator_nats,
+                    preview_complete=preview_complete,
                     token_styles=_row_token_styles(
                         tree,
                         view,

@@ -8,6 +8,7 @@ from collections.abc import Sequence
 
 from natwalk.tree import Distribution, Tree
 from natwalk.tui import (
+    _PREDICTION_STYLE,
     _SUGGESTION_STYLE,
     App,
     _cell_width,
@@ -19,11 +20,12 @@ from natwalk.tui import (
     _format_tree_row,
     _relative_probability,
     _row_display_nats,
+    _row_preview,
     _row_separator_nats,
     _tree_viewport,
     _wrap_spans,
 )
-from natwalk.view import CompactRow, View
+from natwalk.view import CompactRow, View, partition_rows
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -276,6 +278,120 @@ class TerminalWidthTests(unittest.TestCase):
             _row_separator_nats(tree, View(), row),
             (-math.log(0.6) - math.log(0.7),),
         )
+
+    def test_row_preview_walks_only_known_greedy_children(self) -> None:
+        tree = Tree(Distribution(tokens=(10,), probabilities=(1.0,)))
+        first = tree.put_child(
+            tree.root,
+            0,
+            Distribution(tokens=(20, 21), probabilities=(0.75, 0.25)),
+        )
+        second = tree.put_child(
+            first,
+            0,
+            Distribution(tokens=(30,), probabilities=(1.0,)),
+        )
+        row = CompactRow(
+            parent=tree.root,
+            rank=0,
+            depth=0,
+            ancestor_last=(),
+            is_last=True,
+            tokens=(10,),
+            edge_nats=0.0,
+            path_nats=0.0,
+            child=first,
+            open_ended=True,
+            ranks=(0,),
+        )
+        before = len(tree.nodes)
+
+        tokens, separator_nats, complete = _row_preview(tree, View(), row)
+
+        self.assertEqual(tokens, (20, 30))
+        self.assertEqual(
+            separator_nats,
+            (-math.log(0.75), -math.log(0.75)),
+        )
+        self.assertFalse(complete)
+        self.assertEqual(len(tree.nodes), before)
+        self.assertIsNone(tree.child(second, 0))
+
+    def test_forest_preview_uses_its_most_probable_concrete_member(self) -> None:
+        tree = Tree(
+            Distribution(
+                tokens=(10, 11, 12),
+                probabilities=(0.6, 0.3, 0.1),
+            )
+        )
+        forest = next(row for row in partition_rows(tree, View(), row_limit=2) if row.forest)
+
+        tokens, separator_nats, complete = _row_preview(tree, View(), forest)
+
+        self.assertEqual(tokens, (11,))
+        self.assertEqual(separator_nats, (-math.log(0.3),))
+        self.assertFalse(complete)
+
+    def test_preview_replaces_open_ended_ellipsis_and_dims_only_nodes(self) -> None:
+        row = CompactRow(
+            parent=0,
+            rank=0,
+            depth=0,
+            ancestor_last=(),
+            is_last=True,
+            tokens=(1,),
+            edge_nats=1.0,
+            path_nats=1.0,
+            child=1,
+            open_ended=True,
+        )
+        kwargs = {
+            "selected": False,
+            "columns": 100,
+            "display_nats": 1.0,
+            "nat_reference": 1.0,
+            "branch_nats": 1.0,
+            "branch_reference": 1.0,
+            "preview_tokens": (2, 3),
+            "preview_separator_nats": (1.5, 2.0),
+            "preview_complete": False,
+        }
+
+        plain = _format_tree_row(row, str, color=False, **kwargs)
+        colored = _format_tree_row(row, str, color=True, **kwargs)
+
+        self.assertIn("1 · 2 · 3 · …", plain)
+        self.assertNotIn("1 · …", plain)
+        self.assertIn(f"\033[{_PREDICTION_STYLE}m2\033[0m", colored)
+        self.assertNotIn(f"\033[{_PREDICTION_STYLE}m · \033[0m", colored)
+
+    def test_forest_keeps_its_semantic_ellipsis_before_preview(self) -> None:
+        row = CompactRow(
+            parent=0,
+            rank=-1,
+            depth=0,
+            ancestor_last=(),
+            is_last=True,
+            tokens=(),
+            edge_nats=1.0,
+            path_nats=1.0,
+            child=None,
+            forest_count=2,
+            forest_start=1,
+        )
+
+        line = _format_tree_row(
+            row,
+            str,
+            selected=False,
+            columns=100,
+            color=False,
+            preview_tokens=(11,),
+            preview_separator_nats=(2.0,),
+            preview_complete=False,
+        )
+
+        self.assertIn("… · 11 · …", line)
 
     def test_selected_sibling_stays_inside_tree_viewport(self) -> None:
         tree = Tree(

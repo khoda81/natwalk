@@ -56,6 +56,7 @@ class CompactRow:
     child: NodeId | None
     open_ended: bool = False
     forest_count: int = 0
+    forest_start: int = 0
     ancestor_nats: tuple[float, ...] = ()
     ranks: tuple[int, ...] = ()
 
@@ -453,10 +454,12 @@ def _partition_layout_rows(
 
         if event.forest:
             forest_count = event.forest_end - event.forest_start
+            forest_start = event.forest_start
             open_ended = False
             child = None
         else:
             forest_count = 0
+            forest_start = 0
             child = event.node
             open_ended = child is None or bool(tree[child].distribution.tokens)
 
@@ -473,6 +476,7 @@ def _partition_layout_rows(
                 child=child,
                 open_ended=open_ended,
                 forest_count=forest_count,
+                forest_start=forest_start,
                 ancestor_nats=ancestor_nats,
                 ranks=event.ranks[common:],
             )
