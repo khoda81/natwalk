@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from .model import Cursor
 from .session import Checkpoint, Session
-from .sync import NodeUpdate, RevealUpdate, TreeReplica, reveal, updates
+from .sync import TreeReplica, TreeUpdate, reveal, updates
 from .tree import NodeId
 
 type CommandId = int
@@ -48,7 +48,7 @@ type Command = Advance | Rewind | Reveal | Stop
 
 @dataclass(frozen=True, slots=True)
 class TreeUpdates:
-    nodes: tuple[NodeUpdate | RevealUpdate, ...]
+    nodes: tuple[TreeUpdate, ...]
     frontier: int
 
 
@@ -259,7 +259,7 @@ def _run_engine(factory: CursorFactory, commands, events, max_tree_bytes: int | 
             nonlocal published
             batch = updates(session.tree, start=published)
             events.put(TreeUpdates(batch, len(session.search.frontier)))
-            published += len(batch)
+            published = len(session.tree.nodes)
 
         def publish_state() -> None:
             events.put(EngineState(session.root, len(history)))
