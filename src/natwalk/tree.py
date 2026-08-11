@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 type NodeId = int
 
@@ -31,6 +33,11 @@ class Node:
     rank: int
     distribution: Distribution
     _children: dict[int, NodeId] = field(default_factory=dict, compare=False, repr=False)
+
+    @property
+    def children(self) -> Mapping[int, NodeId]:
+        """Discovered child links as a read-only mapping."""
+        return MappingProxyType(self._children)
 
 
 class Tree:
