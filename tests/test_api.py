@@ -15,7 +15,6 @@ class PublicApiTests(unittest.TestCase):
             "NodeUpdate",
             "Row",
             "Search",
-            "SearchWorker",
             "Session",
             "Suggestion",
             "Tree",
@@ -33,6 +32,7 @@ class PublicApiTests(unittest.TestCase):
     def test_removed_explorer_api_is_not_kept_as_compatibility_state(self) -> None:
         for name in (
             "Navigator",
+            "SearchWorker",
             "TokenTreeExplorer",
             "TreeEntry",
             "RankedDistribution",
