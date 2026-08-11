@@ -174,9 +174,25 @@ forced = navigation.choose(0)
 navigation.undo()
 ```
 
-## Demos
+## Terminal UI
 
-### llama.cpp / GGUF
+The generic terminal UI is part of the package rather than an example-specific module:
+
+```python
+from natwalk.tui import run_tui
+
+run_tui(
+    cursor,
+    describe_token,
+    title="my model · natwalk",
+)
+```
+
+It depends only on the natwalk cursor contract. Model-specific adapters belong with the model project so natwalk does not acquire heavyweight backend dependencies such as PyTorch or MuScriptor.
+
+The renderer clips by terminal display cells and guarantees each emitted row fits the reported terminal width instead of relying on Python string length.
+
+## llama.cpp demo
 
 `examples/llm_app.py` can resolve an existing Ollama model directly to its GGUF blob:
 
@@ -186,19 +202,6 @@ uv run examples/llm_app.py \
   "The most surprising thing about information theory is"
 ```
 
-### MuScriptor
+The demo contains only llama.cpp-specific model adaptation and imports the shared UI from `natwalk.tui`.
 
-With sibling checkouts of MuScriptor and natwalk:
-
-```bash
-uv run \
-  --project ~/Projects/muscriptor \
-  --with-editable ~/Projects/natwalk \
-  -- python ~/Projects/natwalk/examples/muscriptor_cli.py \
-  "samples/Laura Marling - What He Wrote.mp3" \
-  --model medium \
-  --device cuda \
-  --chunk 0
-```
-
-Both demos use the same shared TUI and the same search/navigation/view state model. Backend-specific code is limited to model checkpointing, prediction, observation, and token display.
+MuScriptor-specific code is intentionally not carried in this repository; its natwalk command should live in MuScriptor itself and import the same `run_tui` entry point.
