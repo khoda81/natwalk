@@ -51,6 +51,7 @@ class NavigationCursor:
         return {
             (): (1.0,),
             (0,): (1.0,),
+            (0, 0): (1.0,),
         }.get(self.path, ())
 
     def observe(self, token: int) -> None:
@@ -253,7 +254,7 @@ class InteractiveAppTests(unittest.TestCase):
             started = time.monotonic()
             self.assertFalse(app.handle_key("RIGHT"))
             self.assertLess(time.monotonic() - started, 0.1)
-            self.assertIsNotNone(app.pending)
+            self.assertEqual(len(app.pending), 1)
 
             started = time.monotonic()
             self.assertTrue(app.handle_key("DOWN"))
@@ -276,20 +277,54 @@ class InteractiveAppTests(unittest.TestCase):
         )
         try:
             initial_root = app.root
-            self.assertFalse(app.handle_key("RIGHT"))
-            wait_for_app(app, lambda: app.pending is None and app.root != initial_root)
+            app.handle_key("RIGHT")
+            wait_for_app(app, lambda: not app.pending and app.root != initial_root)
 
             child = app.root
             self.assertEqual(app.view.node, child)
             self.assertEqual(app.tree.path(child), (0,))
             self.assertEqual(app.engine.rewind_depth, 1)
 
-            self.assertFalse(app.handle_key("LEFT"))
-            wait_for_app(app, lambda: app.pending is None and app.root == initial_root)
+            app.handle_key("LEFT")
+            wait_for_app(app, lambda: not app.pending and app.root == initial_root)
 
             self.assertEqual(app.view.node, initial_root)
             self.assertEqual(app.engine.rewind_depth, 0)
             self.assertIn(child, range(len(app.tree.nodes)))
+        finally:
+            app.engine.terminate()
+
+    def test_known_navigation_queues_ahead_of_engine_without_snapping_back(self) -> None:
+        app = App(
+            navigation_cursor,
+            str,
+            title="test",
+            context="",
+            decode_tokens=None,
+            max_tokens=8,
+            budget_nats=1.0,
+            budget_step=0.25,
+            lines=8,
+        )
+        try:
+            wait_for_app(app, lambda: len(app.tree.nodes) >= 4)
+            confirmed_root = app.root
+
+            self.assertTrue(app.handle_key("RIGHT"))
+            self.assertTrue(app.handle_key("RIGHT"))
+            self.assertTrue(app.handle_key("RIGHT"))
+
+            self.assertEqual(app.tree.path(app.view.node), (0, 0, 0))
+            self.assertEqual(app.root, confirmed_root)
+            self.assertEqual(len(app.pending), 3)
+
+            self.assertTrue(app.handle_key("LEFT"))
+            self.assertEqual(app.tree.path(app.view.node), (0, 0))
+            self.assertEqual(len(app.pending), 4)
+
+            wait_for_app(app, lambda: not app.pending)
+            self.assertEqual(app.tree.path(app.root), (0, 0))
+            self.assertEqual(app.view.node, app.root)
         finally:
             app.engine.terminate()
 
