@@ -1,177 +1,186 @@
 # natwalk
 
+<p align="center">
+  <a href="assets/demo-qwen.gif">
+    <img
+      src="assets/demo-qwen.gif"
+      width="49%"
+      alt="Natwalk navigating Qwen3-4B predictions"
+    />
+  </a>
+  <a href="assets/demo-muscriptor.gif">
+    <img
+      src="assets/demo-muscriptor.gif"
+      width="49%"
+      alt="Natwalk navigating MuScriptor predictions"
+    />
+  </a>
+</p>
+
 **Navigate autoregressive distributions in information space.**
 
-`natwalk` is an interaction primitive for generative models where progress is measured in **nats/bits**, not tokens, characters, seconds, or pixels.
+`natwalk` is a model-agnostic interaction and search layer for causal probabilistic models. A backend exposes a complete next-symbol distribution and a rewindable causal cursor; Natwalk explores likely continuations in surprisal distance while the user navigates the discovered probability tree.
 
-A backend exposes the complete next-token distribution and a causal cursor. natwalk can then:
+The core intentionally has no top-k/top-p truncation.
 
-- narrow the distribution by exact equal-information arithmetic-code actions,
-- search the model's token tree with Dijkstra / uniform-cost search in surprisal,
-- expose hidden residual probability as an exact `…` branch,
-- accept a greedy continuation up to a fixed information budget,
-- undo user actions without changing the probability semantics.
+## Model interface
 
-No top-k or top-p truncation is part of the core.
-
-## Exact arithmetic navigation
-
-With `K` choices, one user action selects one of `K` equal-width subintervals of the current arithmetic-code interval and therefore supplies exactly
-
-$$
-\ln K \text{ nats} = \log_2 K \text{ bits}.
-$$
-
-For binary navigation (`K = 2`), every `0`/`1` action is exactly one bit.
-
-If the selected interval lies completely inside one model token interval, that token is forced and committed. The interval is renormalized inside that token and the process repeats.
-
-## Token-tree search
-
-The model tree uses token surprisal as edge cost:
-
-$$
-c(y_t) = -\ln p(y_t \mid y_{<t}).
-$$
-
-Therefore a prefix has cumulative cost
-
-$$
-g(y_{1:n}) = -\ln P(y_{1:n}).
-$$
-
-`TokenTreeExplorer` expands the smallest cumulative cost first: **Dijkstra in information distance**, not BFS by token depth and not beam search.
-
-One model call exposes the complete ranked distribution at a prefix. Children are materialized lazily. Only the cheapest unseen sibling of each expanded parent needs to sit on the global heap; when it is popped, the next sibling is exposed. This is equivalent to inserting the whole vocabulary into the heap without the vocabulary-sized frontier blow-up.
-
-There is no search depth limit. `max_nodes` is only a resource cap.
-
-### Exact ellipsis
-
-If some children are not materialized/displayed, `…` represents their aggregate probability mass:
-
-$$
-p_{\ldots} = \sum_{i \in \text{hidden}} p_i,
-\qquad
-c_{\ldots} = -\ln p_{\ldots}.
-$$
-
-So the ellipsis is a real probability region, not UI hand-waving.
-
-## Budgeted greedy autocomplete
-
-Space can accept the longest greedy continuation whose cumulative surprisal fits a budget `B`:
-
-$$
-\sum_t -\log_2 p(y_t \mid y_{<t}) \le B.
-$$
-
-A confident model may fit many tokens into two bits. An uncertain model may fit none.
+A backend is one rewindable causal cursor:
 
 ```python
-from natwalk import Navigator
+from collections.abc import Sequence
 
-nav = Navigator(cursor, choices=2)
 
-suggestion = nav.greedy_suggestion(max_bits=2.0)
-accepted = nav.accept_greedy(max_bits=2.0)
-nav.undo()
-```
-
-Greedy acceptance is an explicit autocomplete action. It resets any partially narrowed arithmetic interval to `[0, 1)`.
-
-## Backend API
-
-The minimal backend is:
-
-```python
 class Cursor:
-    prefix: tuple[int, ...]
-    ended: bool
-
     def predict(self) -> Sequence[float]:
-        """Return the COMPLETE normalized next-token distribution."""
+        """Return the complete normalized next-symbol distribution.
+
+        Return an empty sequence at end of generation.
+        """
 
     def observe(self, token: int) -> None:
-        """Commit one token and advance causal state."""
+        """Advance the causal state by one token."""
 
-    def clone(self) -> "Cursor":
-        """Fork the causal state."""
+    def checkpoint(self) -> object:
+        """Return a cheap rewind point."""
+
+    def restore(self, checkpoint: object) -> None:
+        """Restore a previous rewind point."""
 ```
 
-Large transformer backends should usually also implement:
+Natwalk trusts the distribution contract. It does not silently normalize or truncate model output.
 
-```python
-def checkpoint(self) -> object: ...
-def restore(self, checkpoint: object) -> None: ...
+## Search in information distance
+
+For an edge with conditional probability `p`, Natwalk uses
+
+```text
+edge cost = -ln p
 ```
 
-natwalk then speculates by rewinding lightweight cursor controls rather than cloning bulk KV tensors.
+and runs uniform-cost search from the current causal root. Because each complete distribution is stored in descending probability order, sibling edge costs are already sorted. The search therefore keeps only the next sibling from each active parent on the heap: a lazy k-way merge that produces the same order as eager Dijkstra without inserting an entire vocabulary into the frontier.
 
-## MuScriptor demo
+`Search.step()` advances exactly one Dijkstra transition. `Search.discover()` additionally fast-forwards already-known edges after rerooting and stops at the next genuinely new node.
 
-The first live backend is [MuScriptor](https://github.com/muscriptor/muscriptor), using its complete 1,393-symbol transcription distribution.
+## One append-only probability tree
 
-With sibling checkouts at `~/Projects/muscriptor` and `~/Projects/natwalk`:
+`Tree` is the discovered model knowledge.
+
+Every published node is complete and immutable with respect to its distribution:
+
+```text
+parent node id
+rank within the parent's distribution
+complete ranked distribution
+map of discovered child ranks -> node ids
+```
+
+Vocabulary children remain virtual until their distribution is actually discovered. Tokens, edge surprisal, paths, depth, and cumulative path cost are derived rather than duplicated as mutable state.
+
+Rerooting never deletes discovered knowledge. Search scheduling is reset relative to the new root, while the append-only tree is retained and reused.
+
+## Process-isolated interactive engine
+
+The interactive TUI runs model execution in a spawned worker process. The worker owns the authoritative `Session`, cursor, search frontier, and causal history; the UI receives an idempotent append-only `TreeReplica`.
+
+Known navigation can be queued optimistically. The visible cursor moves immediately through already-discovered edges while authoritative `Advance` / `Rewind` commands catch up in FIFO order. If the UI reaches an undiscovered edge, that edge becomes a natural barrier until its child distribution arrives.
+
+This keeps the terminal responsive without giving the UI a second mutable copy of model/search state.
+
+## Probability-partition TUI
+
+The terminal renderer treats vertical space as a probability budget.
+
+Every physical row represents exactly one disjoint continuation event. Starting from the whole visible continuation mass, each additional row refines one currently visible event into two disjoint events. Renderer structure never creates extra semantic rows.
+
+The selected events are then laid out as a leaf-only radix trie:
+
+- shared prefixes are factored horizontally;
+- internal trie nodes consume columns, never rows;
+- long unary paths stay collapsed on one line;
+- branch connectors attach at the actual token boundary where paths diverge;
+- branch grayscale represents aggregate displayed probability mass;
+- right-hand nat values are cumulative surprisal from the visible causal cursor.
+
+The result is a dense view of model uncertainty that scales from language-model vocabularies to structured symbolic models.
+
+## Terminal controls
+
+```text
+↑ / ↓             select sibling rank
+← / Backspace     rewind one causal edge
+→                 advance into selected child
+Space             accept highlighted completion
+Tab / Shift-Tab   cycle suggestions
+[ / ]             change completion budget
+d                 debug state
+q                 quit
+```
+
+## Demos
+
+### llama.cpp / GGUF
+
+`examples/llm_app.py` adapts any local GGUF model through `llama-cpp-python`:
 
 ```bash
-uv run \
-  --project ~/Projects/muscriptor \
-  --with-editable ~/Projects/natwalk \
-  -- python ~/Projects/natwalk/examples/muscriptor_cli.py \
-  "samples/Laura Marling - What He Wrote.mp3" \
+uv run --with-editable . examples/llm_app.py \
+  "The most interesting consequence of information theory is" \
+  --model-path /path/to/model.gguf
+```
+
+It can also resolve an existing Ollama model directly:
+
+```bash
+uv run --with-editable . examples/llm_app.py \
+  "The most surprising thing about information theory is" \
+  --model ministral-3:14b
+```
+
+### MuScriptor
+
+`examples/muscriptor_app.py` adapts MuScriptor's causal music-transcription distribution to the same Natwalk cursor contract:
+
+```bash
+uv run --with-editable . examples/muscriptor_app.py \
+  "../muscriptor/samples/Laura Marling - What He Wrote.mp3" \
   --model medium \
   --device cuda \
   --chunk 0
 ```
 
-The CLI defaults to binary navigation and a 2-bit Space suggestion:
+MuScriptor itself does not depend on Natwalk; the integration lives entirely in the example adapter.
 
-```text
-Budget: 2.00 bit    binary action: 1.00 bit
+## Library API
 
-Committed:
-tie · t=0.23s · program(acoustic_guitar) · note_on
+The core pieces are usable independently of the TUI:
 
-Suggestion [1.87/2.00 bit]:
-A2 · t=0.45s · note_off · A2 · note_on · E3
+```python
+from natwalk import Session, completions, greedy
 
-tree: 84 nodes · 31 model expansions · 12 frontier · ⟳
+session = Session(cursor)
+session.search.discover()
 
-  ▶ ├┬ A2                              0.09 nat
-  │  ├┬ t=0.45s                        0.13 nat
-  │  │  ├┬ note_off                    0.18 nat
-  │  │  │  └─ …  +1389 hidden          0.12 nat
-  ├─ E3                                1.31 nat
-  ├─ program(clean_electric_guitar)    1.72 nat
-  └─ …  +1388 hidden                   2.04 nat
+best = greedy(session.tree, session.root, max_nats=1.5)
+options = completions(session.tree, session.root, max_nats=1.5)
 ```
 
-Controls:
+`greedy()` and `completions()` are read-only queries over already-discovered tree state. They never call the model or mutate search.
 
-```text
-0 / 1       choose an exact binary arithmetic half
-Space       accept the highlighted greedy suggestion
-Backspace   undo the previous user action
-[ / ]       decrease / increase suggestion budget
-↑ / ↓       browse the rendered tree
-← / →       collapse / expand a rendered subtree
-d           toggle debug interval/cost details
-q           quit
-```
+`Navigation` remains available as an optional equal-information interaction layer. It performs arithmetic interval narrowing and commits a token only when the chosen interval forces that token; the TUI itself uses direct causal tree navigation instead.
 
-MuScriptor `shift` tokens are rendered as `t=...s`: they are absolute 100 Hz positions inside the current 5-second chunk, not time deltas.
+## Design invariants
 
-The demo currently operates on one 5-second MuScriptor chunk. Cross-chunk tie/prelude state is not wired into natwalk yet.
+The test suite pins the properties Natwalk depends on:
 
-## Why `natwalk`?
+- lazy sibling search matches eager full-frontier Dijkstra on randomized finite trees;
+- every tree node is published complete or not published at all;
+- conflicting duplicate publication fails instead of being silently repaired;
+- tree synchronization is ordered, resumable, and idempotent;
+- model speculation restores the committed cursor;
+- browsing does not change search scheduling;
+- queued causal navigation converges exactly to the authoritative engine root;
+- every rendered probability row is one disjoint event and partition mass is conserved;
+- terminal layout is measured in display cells rather than Python string length.
 
-Ordinary autocomplete asks:
-
-> how many tokens should I suggest?
-
-natwalk asks:
-
-> how much information should this interaction specify?
-
-That same primitive can apply to text, code, music, speech, image tokens, or any other causal probabilistic model.
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the ownership model and runtime protocol.
