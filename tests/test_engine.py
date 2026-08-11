@@ -61,6 +61,23 @@ class EngineTests(unittest.TestCase):
         finally:
             client.terminate()
 
+    def test_tree_memory_budget_pauses_background_search_but_not_commands(self) -> None:
+        # Root payload is 3 entries * 12 packed bytes * 2 tree copies = 72 bytes.
+        client = EngineClient(toy_cursor, max_tree_bytes=72)
+        client.start()
+        try:
+            wait_until(client, lambda: client.root == 0)
+            time.sleep(0.05)
+            client.poll()
+            self.assertEqual(len(client.tree.nodes), 1)
+
+            command = client.advance((0,))
+            wait_until(client, lambda: client.done(command) is not None)
+            self.assertEqual(client.tree.path(client.root), (0,))
+            self.assertEqual(len(client.tree.nodes), 2)
+        finally:
+            client.terminate()
+
     def test_duplicate_navigation_command_executes_once(self) -> None:
         client = EngineClient(toy_cursor)
         client.start()
