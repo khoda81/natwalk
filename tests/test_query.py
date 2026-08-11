@@ -17,16 +17,12 @@ def distribution(*probabilities: float) -> Distribution:
 
 class QueryTests(unittest.TestCase):
     def make_tree(self) -> Tree:
-        tree = Tree()
-        tree[0].distribution = distribution(0.6, 0.4)
-        zero = tree.child(0, 0)
-        one = tree.child(0, 1)
-        tree[zero].distribution = distribution(0.55, 0.45)
-        tree[one].distribution = distribution(0.7, 0.3)
+        tree = Tree(distribution(0.6, 0.4))
+        zero = tree.put_child(0, 0, distribution(0.55, 0.45))
+        one = tree.put_child(0, 1, distribution(0.7, 0.3))
         for parent in (zero, one):
             for rank in (0, 1):
-                child = tree.child(parent, rank)
-                tree[child].distribution = Distribution((), ())
+                tree.put_child(parent, rank, Distribution((), ()))
         return tree
 
     def test_greedy_follows_rank_zero_until_budget_boundary(self) -> None:
@@ -40,8 +36,7 @@ class QueryTests(unittest.TestCase):
         self.assertTrue(suggestion.complete)
 
     def test_greedy_marks_unknown_tail_incomplete(self) -> None:
-        tree = Tree()
-        tree[0].distribution = distribution(0.8, 0.2)
+        tree = Tree(distribution(0.8, 0.2))
 
         suggestion = greedy(tree, 0, max_nats=10.0)
 
@@ -61,8 +56,7 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(suggestions[0].tokens, greedy(tree, 0, max_nats=3.0).tokens)
 
     def test_queries_do_not_materialize_virtual_children(self) -> None:
-        tree = Tree()
-        tree[0].distribution = distribution(0.5, 0.3, 0.2)
+        tree = Tree(distribution(0.5, 0.3, 0.2))
         before = len(tree.nodes)
 
         suggestions = completions(tree, 0, max_nats=10.0)
