@@ -10,8 +10,41 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from struct import Struct
 from types import MappingProxyType
+from typing import Protocol, runtime_checkable
 
 type NodeId = int
+
+
+@runtime_checkable
+class RankedDistribution(Protocol):
+    """Probability-ranked next-symbol distribution.
+
+    Backends own the concrete representation. Natwalk only requires random
+    access by probability rank, exact aggregate range mass, reverse token
+    lookup for explicit navigation, and a retained-storage estimate.
+    """
+
+    def __len__(self) -> int: ...
+
+    @property
+    def revealed(self) -> int:
+        """Concrete ranked prefix currently available to the consumer."""
+        ...
+
+    @property
+    def storage_bytes(self) -> int:
+        """Approximate retained payload owned by this distribution."""
+        ...
+
+    def token(self, rank: int) -> int: ...
+
+    def probability(self, rank: int) -> float: ...
+
+    def mass(self, start: int, end: int) -> float: ...
+
+    def rank(self, token: int) -> int: ...
+
+    def nats(self, rank: int) -> float: ...
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
@@ -40,7 +73,9 @@ class _PackedUInt32(Sequence[int]):
         if isinstance(index, slice):
             start, stop, step = index.indices(len(self))
             if step == 1:
-                return type(self)(self._data[start * self._ITEM_SIZE : stop * self._ITEM_SIZE])
+                return type(self)(
+                    self._data[start * self._ITEM_SIZE : stop * self._ITEM_SIZE]
+                )
             return tuple(self[position] for position in range(start, stop, step))
         if index < 0:
             index += len(self)
@@ -103,7 +138,9 @@ class _PackedFloat64(Sequence[float]):
         if isinstance(index, slice):
             start, stop, step = index.indices(len(self))
             if step == 1:
-                return type(self)(self._data[start * self._ITEM_SIZE : stop * self._ITEM_SIZE])
+                return type(self)(
+                    self._data[start * self._ITEM_SIZE : stop * self._ITEM_SIZE]
+                )
             return tuple(self[position] for position in range(start, stop, step))
         if index < 0:
             index += len(self)
@@ -133,11 +170,11 @@ class _PackedFloat64(Sequence[float]):
 
 @dataclass(frozen=True, slots=True)
 class Distribution:
-    """A complete next-symbol distribution in descending probability order.
+    """Dependency-free complete ranked distribution.
 
-    Token ids and probabilities are retained in immutable packed storage rather
-    than as one boxed Python object per vocabulary entry. They still expose the
-    normal read-only ``Sequence`` interface used by the rest of Natwalk.
+    This is Natwalk's default adapter for ordinary ``Sequence[float]`` model
+    outputs. Backends may instead supply any object implementing
+    :class:`RankedDistribution` and retain their own native representation.
     """
 
     tokens: Sequence[int]
@@ -155,12 +192,29 @@ class Distribution:
         return len(self.tokens)
 
     @property
+    def revealed(self) -> int:
+        return len(self)
+
+    @property
     def storage_bytes(self) -> int:
-        """Packed payload size, excluding small Python object overhead."""
         return len(self) * (_PackedUInt32._ITEM_SIZE + _PackedFloat64._ITEM_SIZE)
 
+    def token(self, rank: int) -> int:
+        return self.tokens[rank]
+
+    def probability(self, rank: int) -> float:
+        return self.probabilities[rank]
+
+    def mass(self, start: int, end: int) -> float:
+        if not 0 <= start <= end <= len(self):
+            raise IndexError((start, end))
+        return math.fsum(self.probabilities[start:end])
+
+    def rank(self, token: int) -> int:
+        return self.tokens.index(token)
+
     def nats(self, rank: int) -> float:
-        probability = self.probabilities[rank]
+        probability = self.probability(rank)
         return -math.log(probability) if probability != 0.0 else math.inf
 
 
@@ -170,26 +224,27 @@ class Node:
 
     parent: NodeId | None
     rank: int
-    distribution: Distribution
+    distribution: RankedDistribution
     _children: dict[int, NodeId] = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def children(self) -> Mapping[int, NodeId]:
-        """Discovered child links as a read-only mapping."""
         return MappingProxyType(self._children)
 
 
 class Tree:
     """Arena-backed append-only probability trie.
 
-    A node is published only after its complete distribution is known. Child
-    insertion is idempotent: repeating the same write returns the existing node;
-    attempting to give an existing edge a different distribution is an invariant
-    violation.
+    A node is published only after its authoritative distribution is known.
+    Child insertion is idempotent: repeating the same write returns the existing
+    node; attempting to give an existing edge a different distribution is an
+    invariant violation.
     """
 
-    def __init__(self, root_distribution: Distribution) -> None:
-        self.nodes: list[Node] = [Node(parent=None, rank=-1, distribution=root_distribution)]
+    def __init__(self, root_distribution: RankedDistribution) -> None:
+        self.nodes: list[Node] = [
+            Node(parent=None, rank=-1, distribution=root_distribution)
+        ]
         self._storage_bytes = root_distribution.storage_bytes
 
     @property
@@ -198,23 +253,20 @@ class Tree:
 
     @property
     def storage_bytes(self) -> int:
-        """Packed distribution payload retained by this tree."""
         return self._storage_bytes
 
     def __getitem__(self, node: NodeId) -> Node:
         return self.nodes[node]
 
     def child(self, parent_id: NodeId, rank: int) -> NodeId | None:
-        """Return the discovered child at ``rank`` without mutating the tree."""
         return self.nodes[parent_id]._children.get(rank)
 
     def put_child(
         self,
         parent_id: NodeId,
         rank: int,
-        distribution: Distribution,
+        distribution: RankedDistribution,
     ) -> NodeId:
-        """Publish one complete child, idempotently."""
         parent = self.nodes[parent_id]
         if not 0 <= rank < len(parent.distribution):
             raise IndexError(rank)
@@ -237,7 +289,7 @@ class Tree:
         node = self.nodes[node_id]
         if node.parent is None:
             raise ValueError("root has no token")
-        return self.nodes[node.parent].distribution.tokens[node.rank]
+        return self.nodes[node.parent].distribution.token(node.rank)
 
     def edge_nats(self, node_id: NodeId) -> float:
         node = self.nodes[node_id]
