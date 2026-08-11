@@ -8,6 +8,7 @@ from natwalk.tui import (
     App,
     _cell_width,
     _clip,
+    _context_spans,
     _context_text,
     _fit,
     _format_forest_summary,
@@ -108,6 +109,30 @@ class TerminalWidthTests(unittest.TestCase):
         )
 
         self.assertEqual(text, "The answer is definitely")
+
+    def test_semantic_suggestion_gets_sequence_separator(self) -> None:
+        spans = _context_spans("tie · t=0.21s", "acoustic_guitar", None)
+
+        self.assertEqual(
+            spans,
+            (
+                ("tie · t=0.21s", ""),
+                (" · ", ""),
+                ("acoustic_guitar", "1"),
+            ),
+        )
+
+    def test_exact_text_suggestion_keeps_backend_spacing(self) -> None:
+        decode = lambda tokens: " that it"
+        spans = _context_spans("information theory is", " that it", decode)
+
+        self.assertEqual(
+            spans,
+            (
+                ("information theory is", ""),
+                (" that it", "1"),
+            ),
+        )
 
 
 class InteractiveAppTests(unittest.TestCase):
