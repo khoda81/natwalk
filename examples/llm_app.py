@@ -117,7 +117,7 @@ class TokenDisplay:
         if cached is not None:
             return cached
 
-        piece = self.llm.detokenize([token], special=True).decode("utf-8", errors="replace")
+        piece = self.decode((token,))
         if not piece:
             piece = f"<token:{token}>"
         piece = (
@@ -129,6 +129,12 @@ class TokenDisplay:
         )
         self._cache[token] = piece
         return piece
+
+    def decode(self, tokens: tuple[int, ...]) -> str:
+        return self.llm.detokenize(list(tokens), special=True).decode(
+            "utf-8",
+            errors="replace",
+        )
 
 
 def load_model(args: argparse.Namespace) -> tuple[Llama, Path]:
@@ -191,10 +197,13 @@ def main() -> None:
             f"Prompt tokens: {len(prompt_tokens)} · vocab: {llm.n_vocab()} · ctx: {args.n_ctx}",
             file=sys.stderr,
         )
+        display = TokenDisplay(llm)
         run_tui(
             LlamaCursor(llm, prompt_tokens),
-            TokenDisplay(llm),
+            display,
             title=f"natwalk · llama.cpp · {model_path.name}",
+            context=args.prompt,
+            decode_tokens=display.decode,
             max_tokens=args.max_tokens,
             budget_nats=args.budget_nats,
             budget_step=args.budget_step,
