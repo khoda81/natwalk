@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from .tree import Distribution, NodeId, Tree
 
-Evaluator = Callable[[Tree, NodeId], Distribution]
+type Evaluator = Callable[[Tree, NodeId], Distribution]
 
 
 @dataclass(order=True, frozen=True, slots=True)
