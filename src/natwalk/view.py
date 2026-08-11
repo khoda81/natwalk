@@ -144,19 +144,6 @@ def forest_nats(
     return parent_nats - math.log(mass) if mass > 0.0 else math.inf
 
 
-def _remaining_nats(total_nats: float, part_nats: float) -> float:
-    """Return surprisal of ``total - part`` without rescanning probabilities."""
-    if math.isinf(total_nats):
-        return math.inf
-    if part_nats < total_nats:
-        raise ValueError("partition part cannot be more probable than its parent")
-
-    ratio = math.exp(total_nats - part_nats)
-    if ratio == 1.0:
-        return math.inf
-    return total_nats - math.log1p(-ratio)
-
-
 def partition_rows(
     tree: Tree,
     view: View,
@@ -320,7 +307,6 @@ def _partition_split(
             prefix_ranks=event.ranks,
             prefix_tokens=event.tokens,
             base_nats=event.forest_base_nats,
-            range_nats=_remaining_nats(event.nats, first.nats),
         )
         return first, rest
 
@@ -347,7 +333,6 @@ def _partition_split(
         prefix_ranks=event.ranks,
         prefix_tokens=event.tokens,
         base_nats=event.nats,
-        range_nats=_remaining_nats(event.nats, first.nats),
     )
     return first, rest
 
