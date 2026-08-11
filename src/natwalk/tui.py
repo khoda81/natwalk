@@ -26,6 +26,17 @@ type DescribeToken = Callable[[int], str]
 _KEY_POLL_SECONDS = 0.05
 _REDRAW_SECONDS = 0.25
 _FRAME_OVERHEAD = 14
+_ESCAPE_KEYS = {
+    b"\x1b[A": "UP",
+    b"\x1b[B": "DOWN",
+    b"\x1b[C": "RIGHT",
+    b"\x1b[D": "LEFT",
+    b"\x1bOA": "UP",
+    b"\x1bOB": "DOWN",
+    b"\x1bOC": "RIGHT",
+    b"\x1bOD": "LEFT",
+    b"\x1b[Z": "BACKTAB",
+}
 
 
 def _cell_width(text: str) -> int:
@@ -153,30 +164,24 @@ def _read_key(timeout: float = _KEY_POLL_SECONDS) -> str | None:
     sequence = bytearray(first)
     deadline = time.monotonic() + 0.05
     while len(sequence) < 16:
+        key = _ESCAPE_KEYS.get(bytes(sequence))
+        if key is not None:
+            return key
+
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         ready, _, _ = select.select([fd], [], [], remaining)
         if not ready:
             break
-        chunk = os.read(fd, 16 - len(sequence))
+        chunk = os.read(fd, 1)
         if not chunk:
             break
         sequence.extend(chunk)
-        if sequence[-1] == ord("~") or sequence[-1] in b"ABCDZ":
+        if sequence[-1] == ord("~"):
             break
 
-    return {
-        b"\x1b[A": "UP",
-        b"\x1b[B": "DOWN",
-        b"\x1b[C": "RIGHT",
-        b"\x1b[D": "LEFT",
-        b"\x1bOA": "UP",
-        b"\x1bOB": "DOWN",
-        b"\x1bOC": "RIGHT",
-        b"\x1bOD": "LEFT",
-        b"\x1b[Z": "BACKTAB",
-    }.get(bytes(sequence), "ESC")
+    return _ESCAPE_KEYS.get(bytes(sequence), "ESC")
 
 
 def _render(
