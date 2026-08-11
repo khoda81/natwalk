@@ -13,12 +13,11 @@ import tty
 import unicodedata
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
 
 from .engine import CommandId, CursorFactory, EngineClient
 from .query import Suggestion, completions, greedy
 from .tree import NodeId, Tree
-from .view import CompactRow, View, compact_rows, forest_nats, move, parent
+from .view import CompactRow, View, compact_rows, forest_nats, move
 
 type DescribeToken = Callable[[int], str]
 type DecodeTokens = Callable[[tuple[int, ...]], str]
@@ -557,7 +556,7 @@ def _render(
     max_tokens: int,
     lines: int | None,
     debug: bool,
-    undo_depth: int,
+    rewind_depth: int,
 ) -> tuple[tuple[Suggestion, ...], int]:
     """Render one frame from replicated tree state without contacting the engine."""
     columns, terminal_rows = _dimensions()
@@ -597,15 +596,14 @@ def _render(
         frame.append(
             _line(
                 f"root {root}  ·  view {view.node}:{view.first_rank}/{view.selected_rank}"
-                f"  ·  undo {undo_depth}",
+                f"  ·  rewind {rewind_depth}",
                 columns,
             )
         )
 
     frame.append(_line(rule, columns))
     committed = tree.path(root)
-    focus = tree.path_from(root, view.node)
-    context_text = _context_text(context, describe, (*committed, *focus), decode_tokens)
+    context_text = _context_text(context, describe, committed, decode_tokens)
     suggestion_text = _sequence_text(describe, suggestion.tokens, decode_tokens)
     if suggestion_text and not suggestion.complete:
         suggestion_text += "…"
@@ -620,7 +618,7 @@ def _render(
     footer = (
         _line(rule, columns),
         _line(
-            "↑↓ rank  ·  ← parent  ·  → child  ·  Space accept  ·  Backspace undo",
+            "↑↓ rank  ·  ←/Backspace parent  ·  → child  ·  Space accept",
             columns,
         ),
         _line(
@@ -750,25 +748,6 @@ def _render(
     return suggestions, completion_index
 
 
-@dataclass(frozen=True, slots=True)
-class _PendingEnter:
-    command_id: CommandId
-    view: View
-
-
-@dataclass(frozen=True, slots=True)
-class _PendingCommit:
-    command_id: CommandId
-
-
-@dataclass(frozen=True, slots=True)
-class _PendingUndo:
-    command_id: CommandId
-
-
-type _Pending = _PendingEnter | _PendingCommit | _PendingUndo
-
-
 class App:
     """Interactive client state around one process-isolated natwalk engine."""
 
@@ -803,10 +782,9 @@ class App:
         self.lines = lines
 
         self.view = View(node=self.root)
-        self.view_history: list[View] = []
         self.completion_index = 0
         self.suggestions: tuple[Suggestion, ...] = ()
-        self.pending: _Pending | None = None
+        self.pending: CommandId | None = None
         self.debug = False
         self.quit_requested = False
         self.last_render = 0.0
@@ -822,29 +800,30 @@ class App:
             raise RuntimeError("engine has no root")
         return root
 
-    @property
-    def terminal(self) -> bool:
-        return not self.tree[self.root].distribution.tokens
+    def _sync_root(self) -> bool:
+        if self.view.node == self.root:
+            return False
+        self.view = View(node=self.root)
+        self.completion_index = 0
+        return True
 
     def poll(self) -> bool:
-        """Apply engine events and complete any pending UI intent."""
+        """Apply engine events and keep the local tree view rooted at the model cursor."""
         changed = self.engine.poll() > 0
+        changed = self._sync_root() or changed
+
         pending = self.pending
         if pending is None:
             return changed
 
-        done = self.engine.take_done(pending.command_id)
+        done = self.engine.take_done(pending)
+        changed = self._sync_root() or changed
         if done is None:
             return changed
 
         self.pending = None
-        if isinstance(pending, _PendingEnter):
-            if self.view == pending.view:
-                self.view_history.append(pending.view)
-                self.view = View(node=done.node)
-                self.completion_index = 0
-        else:
-            self._reset_view()
+        self.view = View(node=self.root)
+        self.completion_index = 0
         return True
 
     def render(self) -> None:
@@ -862,7 +841,7 @@ class App:
             max_tokens=self.max_tokens,
             lines=self.lines,
             debug=self.debug,
-            undo_depth=self.engine.history_depth,
+            rewind_depth=self.engine.rewind_depth,
         )
         self.last_render = time.monotonic()
 
@@ -903,39 +882,27 @@ class App:
         if key == "DOWN":
             self.view = move(self.tree, self.view, 1)
             return True
-        if key == "LEFT" and self.view.node != self.root:
-            self._leave_child()
-            return True
-        if key in ("\x7f", "\b"):
-            return self._undo()
+        if key == "LEFT" or key in ("\x7f", "\b"):
+            return self._rewind()
         if key in (" ", "\r", "\n"):
             return self._accept()
         if key == "RIGHT":
-            return self._enter_child()
+            return self._advance_selected()
         return False
 
-    def _leave_child(self) -> None:
-        if self.view_history:
-            self.view = self.view_history.pop()
-        else:
-            self.view = parent(self.tree, self.view)
-        self.completion_index = 0
-
-    def _undo(self) -> bool:
-        if self.pending is not None or self.engine.history_depth == 0:
+    def _rewind(self) -> bool:
+        if self.pending is not None or self.engine.rewind_depth == 0:
             return False
-        self.pending = _PendingUndo(self.engine.undo())
+        self.pending = self.engine.rewind()
         return False
 
     def _accept(self) -> bool:
         if self.pending is not None:
             return False
         suggestion = self._selected_suggestion()
-        focus = self.tree.path_from(self.root, self.view.node)
-        tokens = (*focus, *suggestion.tokens)
-        if not tokens:
+        if not suggestion.tokens:
             return False
-        self.pending = _PendingCommit(self.engine.commit(tokens))
+        self.pending = self.engine.advance(suggestion.tokens)
         return False
 
     def _selected_suggestion(self) -> Suggestion:
@@ -943,36 +910,21 @@ class App:
             return self.suggestions[self.completion_index % len(self.suggestions)]
         return greedy(
             self.tree,
-            self.view.node,
+            self.root,
             max_nats=self.budget_nats,
             max_tokens=self.max_tokens,
         )
 
-    def _enter_child(self) -> bool:
-        distribution = self.tree[self.view.node].distribution
+    def _advance_selected(self) -> bool:
+        if self.pending is not None:
+            return False
+        distribution = self.tree[self.root].distribution
         if not distribution.tokens:
             return False
 
         selected = min(self.view.selected_rank, len(distribution) - 1)
-        child = self.tree.child(self.view.node, selected)
-        if child is None:
-            if self.pending is not None:
-                return False
-            self.pending = _PendingEnter(
-                self.engine.inspect(self.view.node, selected),
-                self.view,
-            )
-            return False
-
-        self.view_history.append(self.view)
-        self.view = View(node=child)
-        self.completion_index = 0
-        return True
-
-    def _reset_view(self) -> None:
-        self.view = View(node=self.root)
-        self.view_history.clear()
-        self.completion_index = 0
+        self.pending = self.engine.advance((distribution.tokens[selected],))
+        return False
 
 
 def run_tui(
@@ -1004,7 +956,7 @@ def run_tui(
     try:
         with _terminal():
             app.render()
-            while not app.terminal:
+            while True:
                 redraw = app.poll()
                 redraw = app.handle_keys(_read_keys()) or redraw
                 if app.quit_requested:
