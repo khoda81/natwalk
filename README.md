@@ -1,5 +1,22 @@
 # natwalk
 
+<p align="center">
+  <a href="assets/demo-qwen.gif">
+    <img
+      src="assets/demo-qwen.gif"
+      width="49%"
+      alt="Natwalk navigating Qwen3-4B predictions"
+    />
+  </a>
+  <a href="assets/demo-muscriptor.gif">
+    <img
+      src="assets/demo-muscriptor.gif"
+      width="49%"
+      alt="Natwalk navigating MuScriptor predictions"
+    />
+  </a>
+</p>
+
 **Navigate autoregressive distributions in information space.**
 
 `natwalk` is an interaction primitive for causal probabilistic models. A user supplies fixed-information choices while a background uniform-cost search discovers likely model continuations. Browsing the discovered tree is inspection only: it never changes the probability state being searched.
