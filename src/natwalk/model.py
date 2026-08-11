@@ -5,17 +5,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
-from .tree import Distribution
+from .tree import Distribution, RankedDistribution
 
 
 class Cursor(Protocol):
     """One rewindable causal model state.
 
-    ``predict`` returns the complete normalized next-symbol distribution in the
-    token index space accepted by ``observe``. An empty distribution is terminal.
+    ``predict`` returns either a complete normalized next-symbol distribution in
+    token-index space or a backend-native probability-ranked distribution. An
+    empty distribution is terminal. Natwalk never normalizes model output.
     """
 
-    def predict(self) -> Sequence[float]: ...
+    def predict(self) -> Sequence[float] | RankedDistribution: ...
 
     def observe(self, token: int) -> None: ...
 
@@ -24,8 +25,11 @@ class Cursor(Protocol):
     def restore(self, checkpoint: object) -> None: ...
 
 
-def rank(probabilities: Sequence[float]) -> Distribution:
-    """Convert a model distribution to probability-ranked tree representation."""
+def rank(probabilities: Sequence[float] | RankedDistribution) -> RankedDistribution:
+    """Return a probability-ranked view without discarding backend-native storage."""
+    if isinstance(probabilities, RankedDistribution):
+        return probabilities
+
     probs = tuple(float(probability) for probability in probabilities)
     order = sorted(range(len(probs)), key=probs.__getitem__, reverse=True)
     return Distribution(
