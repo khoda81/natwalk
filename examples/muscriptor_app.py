@@ -131,10 +131,10 @@ class MuscriptorContext:
 class MuscriptorCursor:
     """Checkpoint-only complete-distribution cursor over one audio chunk.
 
-    Observed tokens are buffered until a prediction is actually needed. A
-    speculative path replay therefore becomes one sequence forward from the
-    committed KV checkpoint instead of pretending that uncomputed tokens have
-    already advanced the cache one position at a time.
+    Observed tokens are buffered until a prediction is needed. MuScriptor's
+    streaming attention only supports a square first-step prefill or T_q=1
+    incremental decoding, so speculative replay is materialized one token at a
+    time through the model before the final next-token distribution is returned.
     """
 
     def __init__(self, ctx: MuscriptorContext) -> None:
@@ -175,24 +175,25 @@ class MuscriptorCursor:
         if not self._pending:
             raise RuntimeError("MuScriptor cursor has no pending input to evaluate")
 
-        input_ = torch.tensor([self._pending], device=self.device, dtype=torch.long)
+        logits: torch.Tensor | None = None
         with self.lm.autocast:
-            logits = self.lm._compute_logits(
-                input_,
-                self.ctx.cfg_conditions,
-                self.model_state,
-                first_step=self._first_step,
-                cfg_coef=1.0,
-                forbidden_tokens=None,
-            )[0]
+            for token in self._pending:
+                input_ = torch.tensor([[token]], device=self.device, dtype=torch.long)
+                logits = self.lm._compute_logits(
+                    input_,
+                    self.ctx.cfg_conditions,
+                    self.model_state,
+                    first_step=self._first_step,
+                    cfg_coef=1.0,
+                    forbidden_tokens=None,
+                )[0]
 
-        increment = input_.shape[-1]
-        if self._first_step:
-            increment += self.ctx.prepend_length
-        increment_steps(self.lm.transformer, self.model_state, increment=increment)
-        self._first_step = False
+                increment = 1 + (self.ctx.prepend_length if self._first_step else 0)
+                increment_steps(self.lm.transformer, self.model_state, increment=increment)
+                self._first_step = False
+
         self._pending.clear()
-
+        assert logits is not None
         logits = logits.float()
         logits[VALID_CARD:] = -torch.inf
         self._probs = torch.softmax(logits, dim=-1)[:VALID_CARD].double().cpu()
