@@ -50,9 +50,7 @@ class Tree:
     """
 
     def __init__(self, root_distribution: Distribution) -> None:
-        self.nodes: list[Node] = [
-            Node(parent=None, rank=-1, distribution=root_distribution)
-        ]
+        self.nodes: list[Node] = [Node(parent=None, rank=-1, distribution=root_distribution)]
 
     @property
     def root(self) -> NodeId:
@@ -80,9 +78,7 @@ class Tree:
         if existing is not None:
             node = self.nodes[existing]
             if node.distribution != distribution:
-                raise ValueError(
-                    f"conflicting distribution for child ({parent_id}, {rank})"
-                )
+                raise ValueError(f"conflicting distribution for child ({parent_id}, {rank})")
             return existing
 
         child_id = len(self.nodes)
