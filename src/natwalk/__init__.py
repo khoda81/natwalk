@@ -1,5 +1,16 @@
 """Navigate autoregressive distributions in fixed-information steps."""
 
+from .engine import (
+    CommandDone,
+    Commit,
+    EngineClient,
+    EngineError,
+    EngineFailed,
+    EngineState,
+    Inspect,
+    TreeUpdates,
+    Undo,
+)
 from .model import Cursor
 from .navigation import Navigation
 from .navigation import State as NavigationState
@@ -12,8 +23,15 @@ from .view import Row, View, rows
 from .worker import SearchWorker
 
 __all__ = [
+    "CommandDone",
+    "Commit",
     "Cursor",
     "Distribution",
+    "EngineClient",
+    "EngineError",
+    "EngineFailed",
+    "EngineState",
+    "Inspect",
     "Navigation",
     "NavigationState",
     "NodeUpdate",
@@ -24,6 +42,8 @@ __all__ = [
     "Suggestion",
     "Tree",
     "TreeReplica",
+    "TreeUpdates",
+    "Undo",
     "View",
     "completions",
     "greedy",
