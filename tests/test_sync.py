@@ -48,10 +48,7 @@ class TreeSyncTests(unittest.TestCase):
                     replica_distribution.token(rank)
                     for rank in range(replica_distribution.revealed)
                 ),
-                tuple(
-                    source_distribution.token(rank)
-                    for rank in range(len(source_distribution))
-                ),
+                tuple(source_distribution.token(rank) for rank in range(len(source_distribution))),
             )
             self.assertEqual(
                 tuple(
