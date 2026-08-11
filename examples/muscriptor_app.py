@@ -211,7 +211,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="medium", choices=["small", "medium", "large"])
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--chunk", type=int, default=0, help="5-second chunk index")
-    parser.add_argument("--choices", type=int, default=2)
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument(
         "--tree-lines",
@@ -232,7 +231,6 @@ def main() -> None:
         ctx.new_cursor(),
         ctx.describe,
         title=f"natwalk · MuScriptor · {args.model} · chunk {args.chunk}",
-        choices=args.choices,
         max_tokens=args.max_tokens,
         budget_nats=args.budget_nats,
         budget_step=args.budget_step,
