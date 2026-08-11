@@ -21,7 +21,7 @@ from .session import Session
 from .view import View, enter, move, parent
 from .worker import SearchWorker
 
-DescribeToken = Callable[[int], str]
+type DescribeToken = Callable[[int], str]
 
 _KEY_POLL_SECONDS = 0.05
 _REDRAW_SECONDS = 0.25
