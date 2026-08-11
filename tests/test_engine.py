@@ -56,14 +56,18 @@ class EngineTests(unittest.TestCase):
         client.start()
         try:
             wait_until(client, lambda: client.replica.next_node >= 2)
-            self.assertEqual(client.tree[0].distribution.tokens, (0, 1, 2))
+            distribution = client.tree[0].distribution
+            self.assertEqual(
+                tuple(distribution.token(rank) for rank in range(distribution.revealed)),
+                (0, 1, 2),
+            )
             self.assertGreaterEqual(len(client.tree.nodes), 2)
         finally:
             client.terminate()
 
     def test_tree_memory_budget_pauses_background_search_but_not_commands(self) -> None:
-        # Root payload is 3 entries * 12 packed bytes * 2 tree copies = 72 bytes.
-        client = EngineClient(toy_cursor, max_tree_bytes=72)
+        # Root authoritative payload is 3 entries * 12 packed bytes = 36 bytes.
+        client = EngineClient(toy_cursor, max_tree_bytes=36)
         client.start()
         try:
             wait_until(client, lambda: client.root == 0)
