@@ -65,9 +65,7 @@ class TreeReplica:
 
         child = tree.put_child(update.parent, update.rank, update.distribution)
         if child != update.node:
-            raise ValueError(
-                f"tree update {update.node} conflicts with existing child id {child}"
-            )
+            raise ValueError(f"tree update {update.node} conflicts with existing child id {child}")
 
     def apply_many(self, batch: tuple[NodeUpdate, ...]) -> None:
         for update in batch:
