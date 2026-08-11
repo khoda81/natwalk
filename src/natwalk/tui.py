@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from .engine import CommandId, CursorFactory, EngineClient
 from .query import Suggestion, completions, greedy
 from .tree import NodeId, Tree
-from .view import CompactRow, View, compact_rows, forest_nats, move
+from .view import CompactRow, View, forest_nats, move, partition_rows
 
 type DescribeToken = Callable[[int], str]
 type DecodeTokens = Callable[[tuple[int, ...]], str]
@@ -166,25 +166,22 @@ def _tree_viewport(
     *,
     selected: int,
     tree_lines: int,
-    edge_limit: int,
 ) -> tuple[int, int, tuple[CompactRow, ...]]:
-    """Choose compact rows while guaranteeing the selected root sibling is visible."""
-    distribution = tree[view.node].distribution
+    """Choose partition rows while guaranteeing the selected root sibling is visible."""
     roots_above = min(max(2, tree_lines // 8), selected - view.first_rank)
     start = max(view.first_rank, selected - roots_above)
 
     def visible_from(first_rank: int) -> tuple[int, tuple[CompactRow, ...]]:
-        rendered = compact_rows(
-            tree,
-            view,
-            edge_limit=edge_limit,
-            first_rank=first_rank,
-        )
         above = first_rank - view.first_rank
         reserve_above = int(above > 0)
-        reserve_below = int(first_rank < len(distribution) - 1)
-        row_budget = max(0, tree_lines - reserve_above - reserve_below)
-        return above, rendered[:row_budget]
+        row_budget = max(0, tree_lines - reserve_above)
+        rendered = partition_rows(
+            tree,
+            view,
+            row_limit=row_budget,
+            first_rank=first_rank,
+        )
+        return above, rendered
 
     above, visible = visible_from(start)
     selected_visible = any(
@@ -639,31 +636,16 @@ def _render(
         frame.append(_line("  ∅ terminal", columns))
     else:
         selected = min(view.selected_rank, len(distribution) - 1)
-        edge_limit = max(64, tree_lines * 6)
         start, above, visible = _tree_viewport(
             tree,
             view,
             selected=selected,
             tree_lines=tree_lines,
-            edge_limit=edge_limit,
         )
-
-        root_ranks = [
-            row.rank
-            for row in visible
-            if row.depth == 0 and row.parent == view.node and not row.forest
-        ]
-        last_root = max(root_ranks, default=start - 1)
-        tail_start = max(start, last_root + 1)
 
         view_base_nats = tree.path_nats(view.node, ancestor=root)
         above_nats = (
             view_base_nats + forest_nats(distribution, view.first_rank, start) if above else None
-        )
-        tail_nats = (
-            view_base_nats + forest_nats(distribution, tail_start)
-            if tail_start < len(distribution)
-            else None
         )
         row_display_nats = [_row_display_nats(tree, root, view, row) for row in visible]
         row_branch_nats = [
@@ -676,18 +658,12 @@ def _render(
             [
                 *row_display_nats,
                 *([above_nats] if above_nats is not None else []),
-                *([tail_nats] if tail_nats is not None else []),
             ]
         )
         branch_reference = _minimum_finite(
             [
                 *row_branch_nats,
                 *([forest_nats(distribution, view.first_rank, start)] if above else []),
-                *(
-                    [forest_nats(distribution, tail_start)]
-                    if tail_start < len(distribution)
-                    else []
-                ),
             ]
         )
 
@@ -730,18 +706,6 @@ def _render(
                         suggestion.tokens,
                         selected=row_selected,
                     ),
-                )
-            )
-
-        if tail_nats is not None:
-            frame.append(
-                _format_forest_summary(
-                    "↓",
-                    len(distribution) - tail_start,
-                    tail_nats,
-                    columns=columns,
-                    color=color,
-                    nat_reference=nat_reference,
                 )
             )
 
