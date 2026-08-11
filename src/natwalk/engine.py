@@ -19,20 +19,13 @@ type CursorFactory = Callable[[], Cursor]
 
 
 @dataclass(frozen=True, slots=True)
-class Inspect:
-    command_id: CommandId
-    parent: NodeId
-    rank: int
-
-
-@dataclass(frozen=True, slots=True)
-class Commit:
+class Advance:
     command_id: CommandId
     tokens: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class Undo:
+class Rewind:
     command_id: CommandId
 
 
@@ -41,7 +34,7 @@ class Stop:
     pass
 
 
-type Command = Inspect | Commit | Undo | Stop
+type Command = Advance | Rewind | Stop
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +46,7 @@ class TreeUpdates:
 @dataclass(frozen=True, slots=True)
 class EngineState:
     root: NodeId
-    history_depth: int
+    rewind_depth: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +84,7 @@ class EngineClient:
         )
         self.replica = TreeReplica()
         self.root: NodeId | None = None
-        self.history_depth = 0
+        self.rewind_depth = 0
         self.frontier = 0
         self._done: dict[CommandId, CommandDone] = {}
         self._next_command = 0
@@ -143,23 +136,18 @@ class EngineClient:
         self._next_command += 1
         return command_id
 
-    def send(self, command: Inspect | Commit | Undo) -> None:
+    def send(self, command: Advance | Rewind) -> None:
         self._raise_failure()
         self._commands.put(command)
 
-    def inspect(self, parent: NodeId, rank: int) -> CommandId:
+    def advance(self, tokens: tuple[int, ...]) -> CommandId:
         command_id = self.command_id()
-        self.send(Inspect(command_id, parent, rank))
+        self.send(Advance(command_id, tokens))
         return command_id
 
-    def commit(self, tokens: tuple[int, ...]) -> CommandId:
+    def rewind(self) -> CommandId:
         command_id = self.command_id()
-        self.send(Commit(command_id, tokens))
-        return command_id
-
-    def undo(self) -> CommandId:
-        command_id = self.command_id()
-        self.send(Undo(command_id))
+        self.send(Rewind(command_id))
         return command_id
 
     def poll(self) -> int:
@@ -209,7 +197,7 @@ class EngineClient:
             self.frontier = event.frontier
         elif isinstance(event, EngineState):
             self.root = event.root
-            self.history_depth = event.history_depth
+            self.rewind_depth = event.rewind_depth
         elif isinstance(event, CommandDone):
             self._done[event.command_id] = event
         elif isinstance(event, EngineFailed):
@@ -226,7 +214,7 @@ class EngineClient:
 
 
 def _run_engine(factory: CursorFactory, commands, events) -> None:
-    """Own one Session and service commands between synchronous search steps."""
+    """Own one Session and service commands between synchronous search discoveries."""
     try:
         session = Session(factory())
         history: list[Checkpoint] = []
@@ -252,15 +240,12 @@ def _run_engine(factory: CursorFactory, commands, events) -> None:
                 publish_state()
                 return True
 
-            if isinstance(command, Inspect):
-                node = session.inspect_child(command.parent, command.rank)
-            elif isinstance(command, Commit):
-                if command.tokens:
+            if isinstance(command, Advance):
+                for token in command.tokens:
                     history.append(session.checkpoint())
-                    node = session.commit(command.tokens)
-                else:
-                    node = session.root
-            elif isinstance(command, Undo):
+                    session.commit((token,))
+                node = session.root
+            elif isinstance(command, Rewind):
                 if history:
                     session.restore(history.pop())
                 node = session.root
@@ -291,7 +276,7 @@ def _run_engine(factory: CursorFactory, commands, events) -> None:
                 continue
 
             if session.search.frontier:
-                session.search.step()
+                session.search.discover()
                 publish_tree()
                 continue
 

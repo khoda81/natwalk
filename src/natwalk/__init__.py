@@ -1,4 +1,4 @@
-"""Navigate autoregressive distributions in fixed-information steps."""
+"""Navigate autoregressive model distributions in information space."""
 
 from .model import Cursor
 from .navigation import Navigation
@@ -28,4 +28,4 @@ __all__ = [
     "rows",
     "updates",
 ]
-__version__ = "0.2.0"
+__version__ = "1.0.0"

@@ -1,8 +1,25 @@
 # natwalk
 
+<p align="center">
+  <a href="assets/demo-qwen.gif">
+    <img
+      src="assets/demo-qwen.gif"
+      width="49%"
+      alt="Natwalk navigating Qwen3-4B predictions"
+    />
+  </a>
+  <a href="assets/demo-muscriptor.gif">
+    <img
+      src="assets/demo-muscriptor.gif"
+      width="49%"
+      alt="Natwalk navigating MuScriptor predictions"
+    />
+  </a>
+</p>
+
 **Navigate autoregressive distributions in information space.**
 
-`natwalk` is an interaction primitive for causal probabilistic models. A user supplies fixed-information choices while a background uniform-cost search discovers likely model continuations. Browsing the discovered tree is inspection only: it never changes the probability state being searched.
+`natwalk` is a model-agnostic interaction and search layer for causal probabilistic models. A backend exposes a complete next-symbol distribution and a rewindable causal cursor; Natwalk explores likely continuations in surprisal distance while the user navigates the discovered probability tree.
 
 The core intentionally has no top-k/top-p truncation.
 
@@ -31,190 +48,139 @@ class Cursor:
         """Restore a previous rewind point."""
 ```
 
-There is no clone fallback and no required public prefix/ended state. Large transformer backends can keep one mutable KV allocation and checkpoint only the logical controls needed to rewind it.
+Natwalk trusts the distribution contract. It does not silently normalize or truncate model output.
 
-## One probability tree
+## Search in information distance
 
-`Tree` is the single representation of discovered model knowledge.
-
-An expanded node stores its complete probability-ranked distribution. Its vocabulary children are virtual: a concrete `Node` is allocated only when that child acquires a known subtree or somebody needs its identity. This lets the renderer inspect rank 50,000 without constructing 50,000 Python tree nodes.
-
-A concrete node stores only:
-
-```text
-parent node id
-rank within the parent's distribution
-optional known distribution
-map of concrete child ranks -> node ids
-```
-
-Tokens, edge surprisal, paths, depth, and cumulative path cost are derived.
-
-## Dijkstra in information distance
-
-For a token edge with conditional probability `p`:
+For an edge with conditional probability `p`, Natwalk uses
 
 ```text
 edge cost = -ln p
 ```
 
-`Search` performs synchronous uniform-cost search from the committed root. Every expanded parent's children are already ordered from highest to lowest probability, therefore their edge costs are nondecreasing.
+and runs uniform-cost search from the current causal root. Because each complete distribution is stored in descending probability order, sibling edge costs are already sorted. The search therefore keeps only the next sibling from each active parent on the heap: a lazy k-way merge that produces the same order as eager Dijkstra without inserting an entire vocabulary into the frontier.
 
-Instead of putting the whole vocabulary on the global heap, each expanded parent contributes only the head of its sorted sibling stream. When `(parent, rank)` is popped:
+`Search.step()` advances exactly one Dijkstra transition. `Search.discover()` additionally fast-forwards already-known edges after rerooting and stops at the next genuinely new node.
 
-```text
-queue (parent, rank + 1)
-expand child(parent, rank)
-queue (child, 0)
-```
+## One append-only probability tree
 
-The heap is therefore a k-way merge of sorted child streams and produces the same expansion order as eager full-frontier Dijkstra. The test suite checks this against an intentionally stupid eager implementation over randomized finite probability trees.
+`Tree` is the discovered model knowledge.
 
-`Search.step()` is entirely synchronous. `SearchWorker` is only a thread/lock wrapper around the same method; concurrency does not have separate search semantics.
-
-## Session and committed state
-
-`Session` owns:
+Every published node is complete and immutable with respect to its distribution:
 
 ```text
-model cursor
-committed trie root
-checkpoint at that root
-probability tree
-Dijkstra frontier
+parent node id
+rank within the parent's distribution
+complete ranked distribution
+map of discovered child ranks -> node ids
 ```
 
-Search speculation always restores the committed checkpoint, replays from the committed root to the candidate node, predicts, and restores the checkpoint again.
+Vocabulary children remain virtual until their distribution is actually discovered. Tokens, edge surprisal, paths, depth, and cumulative path cost are derived rather than duplicated as mutable state.
 
-`Session.commit(tokens)` is the one token-commit path. Advancing the committed root resets the Dijkstra frontier relative to the new root but keeps already discovered trie knowledge.
+Rerooting never deletes discovered knowledge. Search scheduling is reset relative to the new root, while the append-only tree is retained and reused.
 
-Inspection is separate: `Session.inspect(node)` may cache a descendant distribution without changing either the committed cursor or the search frontier.
+## Process-isolated interactive engine
 
-## Fixed-information navigation
+The interactive TUI runs model execution in a spawned worker process. The worker owns the authoritative `Session`, cursor, search frontier, and causal history; the UI receives an idempotent append-only `TreeReplica`.
 
-`Navigation` owns the pending arithmetic interval and user-action undo history.
+Known navigation can be queued optimistically. The visible cursor moves immediately through already-discovered edges while authoritative `Advance` / `Rewind` commands catch up in FIFO order. If the UI reaches an undiscovered edge, that edge becomes a natural barrier until its child distribution arrives.
 
-With `K` choices, one action divides the current interval into `K` equal-width pieces, corresponding conceptually to
+This keeps the terminal responsive without giving the UI a second mutable copy of model/search state.
 
-$$
-\ln K \text{ nats} = \log_2 K \text{ bits}.
-$$
+## Probability-partition TUI
 
-Tokens are committed only when the whole selected interval lies inside one token cell. If a choice forces no token, the committed root, model cursor, probability tree, and Dijkstra frontier are unchanged.
+The terminal renderer treats vertical space as a probability budget.
 
-That separation is important: arithmetic narrowing is interaction state, not a search filter.
+Every physical row represents exactly one disjoint continuation event. Starting from the whole visible continuation mass, each additional row refines one currently visible event into two disjoint events. Renderer structure never creates extra semantic rows.
 
-Explicit completion acceptance commits a path through the same `Session.commit()` primitive and clears the pending arithmetic interval. Undo restores model/session state only when the action actually changed the committed root; undoing arithmetic-only narrowing leaves whatever search progress happened meanwhile intact.
+The selected events are then laid out as a leaf-only radix trie:
 
-The current interval implementation uses Python floating point. The information semantics are exact conceptually, but the current arithmetic representation is not an integer arithmetic coder.
+- shared prefixes are factored horizontally;
+- internal trie nodes consume columns, never rows;
+- long unary paths stay collapsed on one line;
+- branch connectors attach at the actual token boundary where paths diverge;
+- branch grayscale represents aggregate displayed probability mass;
+- right-hand nat values are cumulative surprisal from the visible causal cursor.
 
-## View state
+The result is a dense view of model uncertainty that scales from language-model vocabularies to structured symbolic models.
 
-Tree browsing is represented as a small zipper-like `View`:
+## Terminal controls
 
-```python
-View(
-    node=x,
-    first_rank=k,
-    selected_rank=i,
-)
+```text
+↑ / ↓             select sibling rank
+← / Backspace     rewind one causal edge
+→                 advance into selected child
+Space             accept highlighted completion
+Tab / Shift-Tab   cycle suggestions
+[ / ]             change completion budget
+d                 debug state
+q                 quit
 ```
-
-Its meaning is approximately **"show children of node `x` starting at sibling rank `k`"**.
-
-The renderer derives frame rows directly from the probability tree. Viewport clipping, sibling tails, indentation, and future corridor compression are rendering decisions rather than search state.
-
-Browsing or materializing a child identity does not enqueue it for Dijkstra.
-
-## Completion queries
-
-Suggestions are read-only queries over known trie state:
-
-```python
-from natwalk import completions, greedy
-
-suggestion = greedy(tree, root, max_nats=1.5)
-options = completions(tree, root, max_nats=1.5)
-```
-
-If the search has not discovered enough of a path, a suggestion is marked incomplete. The query layer never performs model evaluation or mutates the tree.
-
-## Minimal example
-
-```python
-from natwalk import Navigation, Session
-
-
-class TableCursor:
-    def __init__(self):
-        self.prefix = ()
-        self.table = {
-            (): (0.7, 0.3),
-            (0,): (0.8, 0.2),
-        }
-
-    def predict(self):
-        return self.table.get(self.prefix, ())
-
-    def observe(self, token):
-        self.prefix = (*self.prefix, token)
-
-    def checkpoint(self):
-        return self.prefix
-
-    def restore(self, checkpoint):
-        self.prefix = checkpoint
-
-
-session = Session(TableCursor())
-navigation = Navigation(session, choices=2)
-
-session.search.step()  # discover one Dijkstra node
-forced = navigation.choose(0)
-navigation.undo()
-```
-
-## Terminal UI
-
-The generic terminal UI is part of the package rather than an example-specific module:
-
-```python
-from natwalk.tui import run_tui
-
-run_tui(
-    cursor,
-    describe_token,
-    title="my model · natwalk",
-)
-```
-
-It depends only on the natwalk cursor contract. Model-specific adapters can live in examples without adding their heavyweight dependencies to the natwalk package itself.
-
-The renderer clips by terminal display cells and guarantees each emitted row fits the reported terminal width instead of relying on Python string length.
 
 ## Demos
 
 ### llama.cpp / GGUF
 
-`examples/llm_app.py` can resolve an existing Ollama model directly to its GGUF blob:
+`examples/llm_app.py` adapts any local GGUF model through `llama-cpp-python`:
 
 ```bash
-uv run examples/llm_app.py \
-  --model ministral-3:14b \
-  "The most surprising thing about information theory is"
+uv run --with-editable . examples/llm_app.py \
+  "The most interesting consequence of information theory is" \
+  --model-path /path/to/model.gguf
+```
+
+It can also resolve an existing Ollama model directly:
+
+```bash
+uv run --with-editable . examples/llm_app.py \
+  "The most surprising thing about information theory is" \
+  --model ministral-3:14b
 ```
 
 ### MuScriptor
 
-`examples/muscriptor_app.py` is a natwalk demo backed by MuScriptor. It declares MuScriptor with inline uv metadata, while importing natwalk from the current checkout, so it can be run directly from this repository:
+`examples/muscriptor_app.py` adapts MuScriptor's causal music-transcription distribution to the same Natwalk cursor contract:
 
 ```bash
-uv run examples/muscriptor_app.py \
+uv run --with-editable . examples/muscriptor_app.py \
   "../muscriptor/samples/Laura Marling - What He Wrote.mp3" \
   --model medium \
   --device cuda \
-  --chunk 0 \
-  --tree-lines 100
+  --chunk 0
 ```
 
-MuScriptor itself does not depend on or contain natwalk integration code. Both demos adapt their model to the same cursor contract and use the same packaged `natwalk.tui` renderer.
+MuScriptor itself does not depend on Natwalk; the integration lives entirely in the example adapter.
+
+## Library API
+
+The core pieces are usable independently of the TUI:
+
+```python
+from natwalk import Session, completions, greedy
+
+session = Session(cursor)
+session.search.discover()
+
+best = greedy(session.tree, session.root, max_nats=1.5)
+options = completions(session.tree, session.root, max_nats=1.5)
+```
+
+`greedy()` and `completions()` are read-only queries over already-discovered tree state. They never call the model or mutate search.
+
+`Navigation` remains available as an optional equal-information interaction layer. It performs arithmetic interval narrowing and commits a token only when the chosen interval forces that token; the TUI itself uses direct causal tree navigation instead.
+
+## Design invariants
+
+The test suite pins the properties Natwalk depends on:
+
+- lazy sibling search matches eager full-frontier Dijkstra on randomized finite trees;
+- every tree node is published complete or not published at all;
+- conflicting duplicate publication fails instead of being silently repaired;
+- tree synchronization is ordered, resumable, and idempotent;
+- model speculation restores the committed cursor;
+- browsing does not change search scheduling;
+- queued causal navigation converges exactly to the authoritative engine root;
+- every rendered probability row is one disjoint event and partition mass is conserved;
+- terminal layout is measured in display cells rather than Python string length.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the ownership model and runtime protocol.

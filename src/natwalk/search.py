@@ -43,8 +43,8 @@ class Search:
         self.frontier.clear()
         self._push(root, 0, 0.0)
 
-    def step(self) -> NodeId | None:
-        """Pop, evaluate, and publish the next lowest-cost virtual child."""
+    def _advance(self) -> tuple[NodeId, bool] | None:
+        """Advance one Dijkstra candidate and report whether it discovered a node."""
         if not self.frontier:
             return None
 
@@ -54,6 +54,7 @@ class Search:
         self._push(candidate.parent, candidate.rank + 1, parent_nats)
 
         child = self.tree.child(candidate.parent, candidate.rank)
+        discovered = child is None
         if child is None:
             child_distribution = self.evaluate(
                 self.tree,
@@ -67,4 +68,17 @@ class Search:
             )
 
         self._push(child, 0, candidate.path_nats)
-        return child
+        return child, discovered
+
+    def step(self) -> NodeId | None:
+        """Advance exactly one lowest-cost frontier candidate."""
+        result = self._advance()
+        return None if result is None else result[0]
+
+    def discover(self) -> NodeId | None:
+        """Fast-forward known edges and return the next newly discovered node."""
+        while (result := self._advance()) is not None:
+            child, discovered = result
+            if discovered:
+                return child
+        return None

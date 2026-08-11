@@ -103,6 +103,28 @@ class SearchTests(unittest.TestCase):
         assert node is not None
         self.assertEqual(tree.path(node), (0, 0))
 
+    def test_discover_fast_forwards_known_edges(self) -> None:
+        table = {
+            (): distribution([0.9, 0.1]),
+            (0,): distribution([0.9, 0.1]),
+        }
+        tree = Tree(table[()])
+        known_child = tree.put_child(tree.root, 0, table[(0,)])
+        evaluations: list[tuple[int, int]] = []
+
+        def evaluate(tree: Tree, parent: int, rank: int) -> Distribution:
+            evaluations.append((parent, rank))
+            token = tree[parent].distribution.tokens[rank]
+            return table.get((*tree.path(parent), token), EMPTY)
+
+        search = Search(tree, evaluate)
+        node = search.discover()
+
+        assert node is not None
+        self.assertEqual(tree.path(node), (0, 0))
+        self.assertEqual(evaluations, [(known_child, 0)])
+        self.assertEqual(len(tree.nodes), 3)
+
     def test_zero_probability_tail_never_enters_frontier(self) -> None:
         table = {(): distribution([0.75, 0.25, 0.0])}
         tree = Tree(table[()])

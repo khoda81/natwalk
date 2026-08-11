@@ -1,27 +1,16 @@
 # Architecture
 
-natwalk is split by ownership. Each piece of mutable state has one reason to exist and one owner.
+Natwalk is organized around ownership: each mutable fact has one source of truth.
 
 ## Sources of truth
 
 ```text
-model execution
-    Cursor + committed checkpoint
-
-committed generation state
-    Session.root
-
-known probability structure
-    Tree
-
-search scheduling
-    Search.frontier
-
-pending user information + action history
-    Navigation
-
-inspection state
-    View
+model execution            Cursor + committed checkpoint
+causal generation state    Session.root
+known probability state    Tree
+search scheduling          Search.frontier
+interactive command order  Engine command queue + history
+client inspection state    View
 ```
 
 The design goal is not merely separation into classes. It is to avoid keeping two mutable representations of the same fact.
@@ -39,80 +28,71 @@ restore(checkpoint)
 
 An empty distribution means terminal.
 
-There is no `clone()` capability and no required `prefix` or `ended` field. Transformer implementations are expected to retain one mutable KV allocation and make checkpoint/restore cheap.
+Natwalk trusts this contract. It does not silently renormalize model output. There is no clone fallback and no required public prefix/ended state. Transformer implementations can retain one mutable KV allocation and checkpoint only the logical controls needed to rewind it.
 
-## Probability tree
+## Distribution and Tree
 
-`Tree` is an arena of concrete nodes. Node identity is an integer.
+A `Distribution` contains the complete next-symbol probabilities in descending probability order.
 
-A node contains:
+`Tree` is an arena-backed append-only trie. A node contains:
 
 ```text
 parent: NodeId | None
 rank: int
-known distribution: Distribution | None
-concrete children: rank -> NodeId
+distribution: Distribution
+children: rank -> NodeId
 ```
 
-An expanded node's `Distribution` contains the complete next-symbol probabilities in descending probability order.
+A node is published only after its complete distribution is known. There is no incomplete-node state.
 
-All vocabulary children therefore exist virtually as `(parent, rank)` even if no `Node` object has been allocated for them. A concrete child node is created only when a subtree or stable identity is needed.
+All vocabulary children exist virtually as `(parent, rank)`. `tree.child(parent, rank)` is a read-only lookup; `tree.put_child(parent, rank, distribution)` is the publication boundary. Repeating an identical publication is an idempotent no-op. Publishing conflicting contents for an existing edge is an invariant violation.
 
-The tree does **not** store:
+The tree does not duplicate facts that can be derived cheaply:
 
 ```text
-token                derived from parent distribution + rank
-edge surprisal       derived as -ln(probability)
-path                  derived through parent links
-depth                 derived through parent links
-cumulative path cost  accumulated by the consumer
-expanded flag         distribution is None vs known
-ended flag            known distribution is empty
-render rows           derived per frame
+token                 parent distribution + rank
+edge surprisal        -ln(probability)
+path                   parent links
+cumulative path cost   accumulated from edge costs
+terminal state         empty distribution
 ```
 
 ## Search
 
-`Search` is synchronous uniform-cost search over the token-prefix tree.
+`Search` is synchronous uniform-cost search over virtual child edges.
 
-For an expanded parent `x`, its child probabilities satisfy
+For a parent `x`, ranked probabilities satisfy
 
 ```text
 p(x, 0) >= p(x, 1) >= p(x, 2) >= ...
 ```
 
-so child edge costs satisfy
+therefore sibling edge costs are already nondecreasing:
 
 ```text
 -ln p(x, 0) <= -ln p(x, 1) <= -ln p(x, 2) <= ...
 ```
 
-Each expanded parent is therefore a sorted stream of Dijkstra candidates.
-
-The global frontier contains only the head of every active stream:
+The global heap needs only one candidate from each active sibling stream:
 
 ```text
 Candidate(path_nats, parent, rank)
 ```
 
-When a candidate is popped:
+Advancing one candidate does exactly this:
 
 ```text
-1. queue the next sibling from the same parent
-2. materialize the popped child identity
-3. evaluate that child if its distribution is unknown
-4. queue rank zero of the child's distribution
+1. pop the lowest-cost (parent, rank)
+2. queue (parent, rank + 1)
+3. reuse the child if already discovered, otherwise evaluate and publish it
+4. queue rank 0 of that child's distribution
 ```
 
-This is a k-way merge of sorted child streams. Tests compare it with eager Dijkstra that inserts every child and assert equal pop paths and costs over randomized finite trees.
+This is a k-way merge of sorted sibling streams. Randomized tests compare it with eager Dijkstra that inserts every child and assert equal pop paths and costs.
 
-### Rerooting
+`Search.step()` performs exactly one transition. `Search.discover()` performs the same transitions but fast-forwards already-known edges until it publishes one genuinely new node or exhausts the frontier. The latter avoids replay churn after rerooting while preserving the same search order.
 
-Search cost is relative to the current committed root. When the committed root changes, `Search.reset(root)` discards only the scheduling frontier and seeds a new root-relative frontier.
-
-The probability tree is retained. If nodes under the new root were already discovered, their distributions are reused when Dijkstra reaches them.
-
-There is no arithmetic interval in Search and no concept of viewport relevance.
+Search has no viewport relevance and no arithmetic interval. Background exploration depends only on the causal root and cumulative surprisal.
 
 ## Session
 
@@ -128,130 +108,126 @@ tree
 search frontier
 ```
 
-### Search evaluation
+### Speculative evaluation
 
-To evaluate a candidate node:
+To evaluate a virtual child `(parent, rank)`:
 
 ```text
 restore committed checkpoint
-replay tokens from committed root to candidate
-predict complete distribution
+replay known tokens from committed root to parent
+observe the selected token
+predict the complete child distribution
 restore committed checkpoint
 ```
 
-The committed cursor is unchanged by speculation.
+Speculation therefore never changes committed model state.
 
-### Inspection
+### Commit and restore
 
-`Session.inspect(node)` uses the same replay mechanism to fill a node's distribution cache, but does not add or remove anything from the search frontier.
+`Session.commit(tokens)` is the mutation path for causal advancement. Existing discovered children are reused; unknown children are predicted and published complete. If the root changes, Session checkpoints the new causal state and resets search relative to that root.
 
-This lets the human inspect arbitrary known/virtual branches independently of Dijkstra scheduling.
+`Session.restore(checkpoint)` restores cursor/root state and resets search there without deleting any discovered tree knowledge.
 
-### Commit
+`Session.inspect_child(parent, rank)` may explicitly discover one child without changing the committed root.
 
-`Session.commit(tokens)` is the only operation that advances committed model state.
+## Optional fixed-information Navigation
 
-For each token it advances the trie root and cursor. At the end it takes one new checkpoint and resets search relative to the new root.
+`Navigation` is a library layer above `Session`, not the TUI's state model.
 
-Session itself does not define user actions or own undo history.
+It owns an equal-width arithmetic interval and action history. A K-way choice narrows the interval to one of K equal pieces. Tokens are committed only when the entire selected interval lies inside one token cell; otherwise the Session root, cursor, tree, and search frontier remain unchanged.
 
-## Navigation
+Explicit acceptance commits through the same `Session.commit()` path. Undo restores Session state only when the corresponding action changed the causal root.
 
-`Navigation` owns two things:
+## Process engine
 
-```text
-pending arithmetic interval [lo, hi)
-user-action undo history
-```
+The interactive app isolates model execution in a spawned process.
 
-One K-way choice narrows the interval to one of K equal-width pieces. After narrowing, the current root distribution is examined. If both interval endpoints fall in the same token cell, that token is forced, the interval is renormalized within that cell, and the token is committed. This repeats while additional tokens are forced.
-
-If no token is forced:
+The child process owns:
 
 ```text
-Session.root       unchanged
-Cursor             unchanged
-Tree               unchanged
-Search.frontier    unchanged
+Session
+Cursor
+Search
+causal checkpoint history
 ```
 
-That invariant is tested directly.
+Commands are ordered:
 
-### Undo
+```text
+Advance(command_id, tokens)
+Rewind(command_id)
+Stop()
+```
 
-History records the previous arithmetic state and the previous committed Session checkpoint.
+`Advance` may contain multiple tokens but stores one checkpoint per token, so `Rewind` always moves one trie edge.
 
-If an action did not change `Session.root`, undo restores only arithmetic state. Search may have progressed while the arithmetic interval was narrowed and that progress is retained.
+The worker drains queued commands FIFO before returning to background search. This gives the command queue a simple authoritative meaning: after all queued commands complete, the last command target is the causal truth.
 
-If an action committed tokens, undo restores the previous committed cursor/root and reroots search there while retaining tree knowledge.
+## Tree synchronization
 
-### Explicit acceptance
+The UI does not share the worker's mutable tree object. It reconstructs an append-only `TreeReplica` from `NodeUpdate` records.
 
-Greedy or alternate completion acceptance is not a separate mutation mechanism. A query produces a token path and `Navigation.accept(path)` commits it through the same `Session.commit()` operation.
+`NodeId` doubles as append-log position. A replica therefore needs only its next unseen node id to resume synchronization.
+
+Applying updates is strict:
+
+```text
+old duplicate      verify exact contents, then no-op
+next expected id   append
+future id          fail: missing update gap
+conflict           fail
+```
+
+This gives reconnect/replay idempotence without a second revision counter.
+
+## Optimistic causal navigation
+
+The TUI has one logical causal cursor: the last queued navigation target.
+
+For an already-discovered child, RIGHT can move the visible cursor immediately and enqueue the authoritative `Advance` behind earlier commands. Several known moves may therefore be queued without waiting for the worker.
+
+LEFT/Backspace likewise queues one-edge `Rewind` and moves the visible cursor to the known parent immediately.
+
+An undiscovered child is a natural queue barrier: the command is sent, but the UI cannot move into a node whose distribution/identity is not yet in the replica.
+
+Intermediate worker state never snaps the UI backward. When the queue drains, the visible cursor and authoritative engine root must converge exactly; disagreement is an error, not something to reconcile silently.
+
+## View
+
+Client-local browsing state is intentionally tiny:
+
+```python
+View(
+    node=x,
+    first_rank=k,
+    selected_rank=i,
+)
+```
+
+It identifies the causal/view root plus sibling-tail selection. It does not schedule search.
+
+## Probability partition
+
+The renderer first decides **which disjoint events deserve rows**, then separately decides how to draw their shared tree geometry.
+
+With a row budget `N`, `partition_rows()` starts from one event representing the visible sibling tail. Each refinement replaces one event with two disjoint events, increasing the row count by exactly one. Candidate refinements currently compete by the probability of their smaller result, preventing extremely unlikely deviations from consuming rows while more probable unresolved alternatives remain elsewhere.
+
+The partition conserves visible probability mass. No renderer-created side branch receives a free row.
+
+## Leaf-only radix layout
+
+Once the event set is fixed, selected paths are ordered in trie order and shared prefixes are factored like a radix/Patricia trie.
+
+The hard layout rule is:
+
+> one semantic probability event = one physical row.
+
+Internal trie structure can consume columns but never additional rows. Long unary paths collapse horizontally. Branches attach at the exact display column of the token boundary where selected events diverge.
+
+Structural connector brightness uses aggregate probability mass of the displayed events beneath that branch. Right-hand nat values remain the exact cumulative surprisal of each row event from the visible causal cursor.
+
+Terminal widths are computed from unpainted Unicode display cells; ANSI styling is applied only after geometry is known.
 
 ## Queries
 
-`greedy()` and `completions()` are read-only traversals over the known trie.
-
-They never:
-
-```text
-call the model
-acquire model execution state
-materialize virtual children
-change the search frontier
-```
-
-If a path reaches unknown trie state, the returned suggestion is marked incomplete.
-
-## View and rendering
-
-`View` is intentionally tiny:
-
-```text
-node
-first_rank
-selected_rank
-```
-
-It represents the sibling-tail forest beginning at `children(node)[first_rank:]` plus a selected sibling.
-
-Rendering derives rows from `Tree + View + frame dimensions`. Virtual children can be rendered directly from the parent's complete distribution without allocating tree nodes.
-
-Browsing may materialize a selected child's identity and `Session.inspect()` may fill its distribution, but neither operation changes Dijkstra scheduling.
-
-The committed root is the lower navigation boundary for a live session. Historical ancestors may remain cached in the persistent tree after commits/undo, but they are not reinterpreted as descendants of the current model checkpoint.
-
-## Background execution
-
-`SearchWorker` wraps synchronous `Search.step()` with one condition/lock and one thread.
-
-It owns no semantic search state. In particular it has no:
-
-```text
-second frontier
-pending-node graph
-generation counter
-range relevance cache
-```
-
-Foreground UI code briefly acquires the same lock to inspect or mutate Session/Navigation state, then releases it while waiting for user input so background search can continue.
-
-## Numerical representation
-
-The arithmetic navigation interval currently uses Python `float`.
-
-The conceptual K-way information accounting is exact, but token-cell containment and renormalization inherit binary64 numerical behavior. Replacing this with an integer/range-coded representation is independent of the search/tree architecture and remains future work.
-
-## Performance work intentionally deferred
-
-The ownership model is designed so these optimizations can be added without changing search semantics:
-
-1. compact/array-backed ranked distributions for very large vocabularies,
-2. faster token->rank lookup for path acceptance,
-3. checkpointing selected hot trie nodes rather than replaying every path from the root,
-4. persistent/copy-on-write KV pages,
-5. batched candidate evaluation,
-6. resource limits/eviction for long-running background search.
-
-The synchronous eager-vs-lazy equivalence tests remain the reference correctness oracle underneath those optimizations.
+`greedy()` and `completions()` are read-only traversals over already-discovered tree state. They never call the model, materialize unknown children, or mutate search scheduling. If known state ends before a requested completion does, the returned suggestion is marked incomplete.
