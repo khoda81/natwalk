@@ -90,10 +90,7 @@ class ReplicaDistribution:
         if end <= self.revealed:
             return math.fsum(self._probabilities[start:end])
         if end == len(self) and start <= self.revealed:
-            return (
-                math.fsum(self._probabilities[start : self.revealed])
-                + self._tail_probability
-            )
+            return math.fsum(self._probabilities[start : self.revealed]) + self._tail_probability
 
         probabilities: list[float] = []
         for rank in range(start, end):
