@@ -188,11 +188,13 @@ run_tui(
 )
 ```
 
-It depends only on the natwalk cursor contract. Model-specific adapters belong with the model project so natwalk does not acquire heavyweight backend dependencies such as PyTorch or MuScriptor.
+It depends only on the natwalk cursor contract. Model-specific adapters can live in examples without adding their heavyweight dependencies to the natwalk package itself.
 
 The renderer clips by terminal display cells and guarantees each emitted row fits the reported terminal width instead of relying on Python string length.
 
-## llama.cpp demo
+## Demos
+
+### llama.cpp / GGUF
 
 `examples/llm_app.py` can resolve an existing Ollama model directly to its GGUF blob:
 
@@ -202,6 +204,17 @@ uv run examples/llm_app.py \
   "The most surprising thing about information theory is"
 ```
 
-The demo contains only llama.cpp-specific model adaptation and imports the shared UI from `natwalk.tui`.
+### MuScriptor
 
-MuScriptor-specific code is intentionally not carried in this repository; its natwalk command should live in MuScriptor itself and import the same `run_tui` entry point.
+`examples/muscriptor_app.py` is a natwalk demo backed by MuScriptor. It declares MuScriptor with inline uv metadata, while importing natwalk from the current checkout, so it can be run directly from this repository:
+
+```bash
+uv run examples/muscriptor_app.py \
+  "../muscriptor/samples/Laura Marling - What He Wrote.mp3" \
+  --model medium \
+  --device cuda \
+  --chunk 0 \
+  --tree-lines 100
+```
+
+MuScriptor itself does not depend on or contain natwalk integration code. Both demos adapt their model to the same cursor contract and use the same packaged `natwalk.tui` renderer.
