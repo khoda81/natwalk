@@ -199,6 +199,7 @@ def main() -> None:
             budget_nats=args.budget_nats,
             budget_step=args.budget_step,
             lines=args.tree_lines,
+            exit_on_quit=True,
         )
     finally:
         llm.close()
