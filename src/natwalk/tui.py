@@ -673,9 +673,7 @@ def _format_tree_row(
 
     for token, preview_nats in zip(preview_tokens, preview_separator_nats, strict=True):
         if label_spans:
-            separator_style = _grayscale(
-                _relative_probability(preview_nats, branch_reference)
-            )
+            separator_style = _grayscale(_relative_probability(preview_nats, branch_reference))
             label_spans.append((" · ", separator_style))
         label_spans.append((describe(token), _PREDICTION_STYLE))
 
