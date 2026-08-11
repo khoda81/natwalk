@@ -76,6 +76,24 @@ class _CompactItem:
     side_forests: tuple[_CompactItem, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _PartitionEvent:
+    """One disjoint cylinder or sibling forest in a display partition."""
+
+    ranks: tuple[int, ...]
+    tokens: tuple[int, ...]
+    nats: float
+    node: NodeId | None = None
+    forest_parent: NodeId | None = None
+    forest_start: int = 0
+    forest_end: int = 0
+    forest_base_nats: float = 0.0
+
+    @property
+    def forest(self) -> bool:
+        return self.forest_parent is not None
+
+
 def iter_rows(tree: Tree, view: View):
     """Yield the view's discovered tree in DFS order without mutating it."""
 
@@ -135,6 +153,242 @@ def forest_nats(
         raise IndexError((start, stop))
     mass = math.fsum(distribution.probabilities[start:stop])
     return parent_nats - math.log(mass) if mass > 0.0 else math.inf
+
+
+def partition_rows(
+    tree: Tree,
+    view: View,
+    *,
+    row_limit: int,
+    first_rank: int | None = None,
+) -> tuple[CompactRow, ...]:
+    """Render a best-first finite partition of continuation space.
+
+    Every returned row is one disjoint probability event. Starting from the
+    whole visible sibling tail, each additional row refines exactly one event
+    into two disjoint events. Refinements compete globally by the probability
+    of their smaller result, so an extremely unlikely side branch cannot steal
+    a row while a more probable unresolved split is available elsewhere.
+
+    This first layout deliberately spends no extra rows on internal trie nodes:
+    concrete prefixes are stacked horizontally and sibling forests end in an
+    ellipsis. Shared-prefix factoring is a separate presentation problem.
+    """
+    if row_limit <= 0:
+        return ()
+
+    root = view.node
+    distribution = tree[root].distribution
+    start = view.first_rank if first_rank is None else first_rank
+    if not 0 <= start <= len(distribution):
+        raise IndexError(start)
+    if start == len(distribution):
+        return ()
+
+    events = [
+        _partition_range(
+            tree,
+            parent=root,
+            start=start,
+            end=len(distribution),
+            prefix_ranks=(),
+            prefix_tokens=(),
+            base_nats=0.0,
+        )
+    ]
+
+    while len(events) < row_limit:
+        candidates: list[tuple[float, float, tuple[int, ...], int, tuple[_PartitionEvent, ...]]] = []
+        for index, event in enumerate(events):
+            split = _partition_split(tree, event)
+            if split is None:
+                continue
+            smaller_piece_nats = max(part.nats for part in split)
+            candidates.append(
+                (
+                    smaller_piece_nats,
+                    event.nats,
+                    _partition_order(event),
+                    index,
+                    split,
+                )
+            )
+
+        if not candidates:
+            break
+
+        *_priority, index, split = min(candidates, key=lambda candidate: candidate[:-1])
+        events[index : index + 1] = split
+
+    events.sort(key=_partition_order)
+    return _partition_compact_rows(tree, root, events)
+
+
+def _partition_branch(
+    tree: Tree,
+    *,
+    parent: NodeId,
+    rank: int,
+    prefix_ranks: tuple[int, ...],
+    prefix_tokens: tuple[int, ...],
+    base_nats: float,
+) -> _PartitionEvent:
+    distribution = tree[parent].distribution
+    return _PartitionEvent(
+        ranks=(*prefix_ranks, rank),
+        tokens=(*prefix_tokens, distribution.tokens[rank]),
+        nats=base_nats + distribution.nats(rank),
+        node=tree.child(parent, rank),
+    )
+
+
+def _partition_range(
+    tree: Tree,
+    *,
+    parent: NodeId,
+    start: int,
+    end: int,
+    prefix_ranks: tuple[int, ...],
+    prefix_tokens: tuple[int, ...],
+    base_nats: float,
+) -> _PartitionEvent:
+    if not 0 <= start < end <= len(tree[parent].distribution):
+        raise IndexError((start, end))
+    if end - start == 1:
+        return _partition_branch(
+            tree,
+            parent=parent,
+            rank=start,
+            prefix_ranks=prefix_ranks,
+            prefix_tokens=prefix_tokens,
+            base_nats=base_nats,
+        )
+    return _PartitionEvent(
+        ranks=prefix_ranks,
+        tokens=prefix_tokens,
+        nats=forest_nats(
+            tree[parent].distribution,
+            start,
+            end,
+            parent_nats=base_nats,
+        ),
+        forest_parent=parent,
+        forest_start=start,
+        forest_end=end,
+        forest_base_nats=base_nats,
+    )
+
+
+def _partition_split(
+    tree: Tree,
+    event: _PartitionEvent,
+) -> tuple[_PartitionEvent, _PartitionEvent] | None:
+    if event.forest:
+        parent = event.forest_parent
+        if parent is None:
+            raise AssertionError("forest event has no parent")
+        if event.forest_end - event.forest_start < 2:
+            raise AssertionError("single-rank ranges must be concrete events")
+
+        first = _partition_branch(
+            tree,
+            parent=parent,
+            rank=event.forest_start,
+            prefix_ranks=event.ranks,
+            prefix_tokens=event.tokens,
+            base_nats=event.forest_base_nats,
+        )
+        rest = _partition_range(
+            tree,
+            parent=parent,
+            start=event.forest_start + 1,
+            end=event.forest_end,
+            prefix_ranks=event.ranks,
+            prefix_tokens=event.tokens,
+            base_nats=event.forest_base_nats,
+        )
+        return first, rest
+
+    child = event.node
+    if child is None:
+        return None
+    distribution = tree[child].distribution
+    if len(distribution) < 2:
+        return None
+
+    first = _partition_branch(
+        tree,
+        parent=child,
+        rank=0,
+        prefix_ranks=event.ranks,
+        prefix_tokens=event.tokens,
+        base_nats=event.nats,
+    )
+    rest = _partition_range(
+        tree,
+        parent=child,
+        start=1,
+        end=len(distribution),
+        prefix_ranks=event.ranks,
+        prefix_tokens=event.tokens,
+        base_nats=event.nats,
+    )
+    return first, rest
+
+
+def _partition_order(event: _PartitionEvent) -> tuple[int, ...]:
+    if event.forest:
+        return (*event.ranks, event.forest_start)
+    return event.ranks
+
+
+def _partition_compact_rows(
+    tree: Tree,
+    root: NodeId,
+    events: list[_PartitionEvent],
+) -> tuple[CompactRow, ...]:
+    rows_out: list[CompactRow] = []
+    represented_roots: set[int] = set()
+
+    for event in events:
+        if event.ranks:
+            root_rank = event.ranks[0]
+        else:
+            root_rank = event.forest_start
+
+        representative_rank = -1
+        if not event.forest and root_rank not in represented_roots:
+            representative_rank = root_rank
+            represented_roots.add(root_rank)
+
+        if event.forest:
+            forest_count = event.forest_end - event.forest_start
+            open_ended = False
+            child = None
+        else:
+            forest_count = 0
+            child = event.node
+            open_ended = child is None or bool(tree[child].distribution.tokens)
+
+        rows_out.append(
+            CompactRow(
+                parent=root,
+                rank=representative_rank,
+                depth=0,
+                ancestor_last=(),
+                is_last=False,
+                tokens=event.tokens,
+                edge_nats=event.nats,
+                path_nats=event.nats,
+                child=child,
+                open_ended=open_ended,
+                forest_count=forest_count,
+            )
+        )
+
+    if rows_out:
+        rows_out[-1] = replace(rows_out[-1], is_last=True)
+    return tuple(rows_out)
 
 
 def compact_rows(
