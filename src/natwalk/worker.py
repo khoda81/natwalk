@@ -11,15 +11,16 @@ from .search import Search
 class SearchWorker:
     """Advance ``Search.step()`` in one background thread.
 
-    Search semantics remain entirely in :class:`Search`. This wrapper only
-    serializes mutation and transports worker failures back to the foreground.
-    Foreground mutation has priority between search steps so a fast producer
-    cannot starve interactive commands.
+    The condition protects only scheduling state; it is never held while model
+    evaluation runs. The mutation lock serializes search/cursor mutation with
+    foreground commands. This separation makes stop requests immediate even if
+    one model call is currently uninterruptible.
     """
 
     def __init__(self, search: Search) -> None:
         self.search = search
         self._condition = threading.Condition()
+        self._mutation = threading.Lock()
         self._foreground_waiting = threading.Event()
         self._stop = False
         self._error: BaseException | None = None
@@ -37,7 +38,7 @@ class SearchWorker:
             raise self._error
 
     def raise_if_failed(self) -> None:
-        """Surface a worker failure without waiting for the search lock."""
+        """Surface a worker failure without waiting for the mutation lock."""
         self._raise_error()
 
     @contextmanager
@@ -45,12 +46,9 @@ class SearchWorker:
         """Serialize one foreground mutation with background search."""
         self._foreground_waiting.set()
         try:
-            with self._condition:
+            with self._mutation:
                 self._raise_error()
-                try:
-                    yield
-                finally:
-                    self._condition.notify_all()
+                yield
                 self._raise_error()
         finally:
             self._foreground_waiting.clear()
@@ -95,7 +93,15 @@ class SearchWorker:
                         self._condition.wait()
                     if self._stop:
                         return
+
+                with self._mutation:
+                    if self._stop or self._foreground_waiting.is_set():
+                        continue
+                    if not self.search.frontier:
+                        continue
                     self.search.step()
+
+                with self._condition:
                     self._condition.notify_all()
         except BaseException as exc:
             with self._condition:
