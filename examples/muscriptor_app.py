@@ -128,7 +128,13 @@ class MuscriptorContext:
 
 
 class MuscriptorCursor:
-    """Checkpoint-only complete-distribution cursor over one audio chunk."""
+    """Checkpoint-only complete-distribution cursor over one audio chunk.
+
+    Observed tokens are buffered until a prediction is actually needed. A
+    speculative path replay therefore becomes one sequence forward from the
+    committed KV checkpoint instead of pretending that uncomputed tokens have
+    already advanced the cache one position at a time.
+    """
 
     def __init__(self, ctx: MuscriptorContext) -> None:
         self.ctx = ctx
@@ -136,44 +142,55 @@ class MuscriptorCursor:
         self.device = ctx.device
         cache_len = ctx.prepend_length + ctx.max_tokens + 1
         self.model_state = init_states(self.lm, batch_size=1, sequence_length=cache_len)
-        self.input = torch.tensor(
-            [[self.lm.initial_token_id]], device=self.device, dtype=torch.long
-        )
-        self.first_step = True
+        self._pending = [self.lm.initial_token_id]
+        self._first_step = True
+        self._last_token: int | None = None
         self._probs: torch.Tensor | None = None
 
     def checkpoint(self) -> object:
         self.predict()
         return (
-            self.input.clone(),
-            self.first_step,
+            tuple(self._pending),
+            self._first_step,
+            self._last_token,
             self._probs,
             snapshot_control_state(self.model_state),
         )
 
     def restore(self, checkpoint: object) -> None:
-        input_, first_step, probs, controls = checkpoint
+        pending, first_step, last_token, probs, controls = checkpoint
         restore_control_state(self.model_state, controls)
-        self.input = input_
-        self.first_step = first_step
+        self._pending = list(pending)
+        self._first_step = first_step
+        self._last_token = last_token
         self._probs = probs
 
     @torch.inference_mode()
     def predict(self) -> Sequence[float]:
-        if not self.first_step and int(self.input.item()) == self.ctx.tokenizer.eos_id:
+        if self._last_token == self.ctx.tokenizer.eos_id:
             return ()
         if self._probs is not None:
             return self._probs
+        if not self._pending:
+            raise RuntimeError("MuScriptor cursor has no pending input to evaluate")
 
+        input_ = torch.tensor([self._pending], device=self.device, dtype=torch.long)
         with self.lm.autocast:
             logits = self.lm._compute_logits(
-                self.input,
+                input_,
                 self.ctx.cfg_conditions,
                 self.model_state,
-                first_step=self.first_step,
+                first_step=self._first_step,
                 cfg_coef=1.0,
                 forbidden_tokens=None,
             )[0]
+
+        increment = input_.shape[-1]
+        if self._first_step:
+            increment += self.ctx.prepend_length
+        increment_steps(self.lm.transformer, self.model_state, increment=increment)
+        self._first_step = False
+        self._pending.clear()
 
         logits = logits.float()
         logits[VALID_CARD:] = -torch.inf
@@ -181,13 +198,8 @@ class MuscriptorCursor:
         return self._probs
 
     def observe(self, token: int) -> None:
-        increment = self.input.shape[-1]
-        if self.first_step:
-            increment += self.ctx.prepend_length
-        increment_steps(self.lm.transformer, self.model_state, increment=increment)
-
-        self.input = torch.tensor([[token]], device=self.device, dtype=torch.long)
-        self.first_step = False
+        self._pending.append(token)
+        self._last_token = token
         self._probs = None
 
 
