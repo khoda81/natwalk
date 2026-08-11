@@ -33,10 +33,7 @@ def greedy(
     used = 0.0
 
     for _ in range(max_tokens):
-        node = tree[node_id]
-        distribution = node.distribution
-        if distribution is None:
-            return Suggestion(tuple(tokens), used, False)
+        distribution = tree[node_id].distribution
         if not distribution.tokens:
             return Suggestion(tuple(tokens), used, True)
 
@@ -46,7 +43,7 @@ def greedy(
 
         tokens.append(distribution.tokens[0])
         used += cost
-        child_id = node.children.get(0)
+        child_id = tree.child(node_id, 0)
         if child_id is None:
             return Suggestion(tuple(tokens), used, False)
         node_id = child_id
@@ -72,12 +69,7 @@ def completions(
         if len(out) >= limit:
             return
 
-        node = tree[node_id]
-        distribution = node.distribution
-        if distribution is None:
-            if path:
-                out.append(Suggestion(path, used, False))
-            return
+        distribution = tree[node_id].distribution
         if not distribution.tokens:
             if path:
                 out.append(Suggestion(path, used, True))
@@ -91,7 +83,7 @@ def completions(
                 break
             extended = True
             next_path = (*path, token)
-            child_id = node.children.get(rank)
+            child_id = tree.child(node_id, rank)
             if len(next_path) >= max_tokens:
                 out.append(Suggestion(next_path, next_used, False))
             elif child_id is None:
