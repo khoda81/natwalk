@@ -107,6 +107,33 @@ class LlamaCursor:
         self._probs = None
 
 
+@dataclass(frozen=True, slots=True)
+class LlamaCursorFactory:
+    """Spawn-safe description of one full llama.cpp inference cursor."""
+
+    model_path: str
+    prompt_tokens: tuple[int, ...]
+    n_ctx: int
+    n_batch: int
+    n_gpu_layers: int
+    threads: int | None
+    verbose: bool
+
+    def __call__(self) -> LlamaCursor:
+        kwargs: dict[str, object] = {
+            "model_path": self.model_path,
+            "n_ctx": self.n_ctx,
+            "n_batch": self.n_batch,
+            "n_gpu_layers": self.n_gpu_layers,
+            "logits_all": False,
+            "verbose": self.verbose,
+        }
+        if self.threads is not None:
+            kwargs["n_threads"] = self.threads
+            kwargs["n_threads_batch"] = self.threads
+        return LlamaCursor(Llama(**kwargs), self.prompt_tokens)
+
+
 class TokenDisplay:
     def __init__(self, llm: Llama) -> None:
         self.llm = llm
@@ -137,25 +164,6 @@ class TokenDisplay:
         )
 
 
-def load_model(args: argparse.Namespace) -> tuple[Llama, Path]:
-    path = (
-        Path(args.model_path).expanduser() if args.model_path else resolve_ollama_gguf(args.model)
-    )
-    print(f"Loading {path} …", file=sys.stderr)
-    kwargs: dict[str, object] = {
-        "model_path": str(path),
-        "n_ctx": args.n_ctx,
-        "n_batch": args.n_batch,
-        "n_gpu_layers": args.n_gpu_layers,
-        "logits_all": False,
-        "verbose": args.llama_verbose,
-    }
-    if args.threads is not None:
-        kwargs["n_threads"] = args.threads
-        kwargs["n_threads_batch"] = args.threads
-    return Llama(**kwargs), path
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("prompt", help="raw text prefix to continue")
@@ -184,9 +192,21 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    llm, model_path = load_model(args)
+    model_path = (
+        Path(args.model_path).expanduser() if args.model_path else resolve_ollama_gguf(args.model)
+    )
+    print(f"Loading {model_path} …", file=sys.stderr)
+
+    tokenizer = Llama(
+        model_path=str(model_path),
+        vocab_only=True,
+        n_gpu_layers=0,
+        verbose=False,
+    )
     try:
-        prompt_tokens = llm.tokenize(args.prompt.encode("utf-8"), add_bos=True, special=True)
+        prompt_tokens = tuple(
+            tokenizer.tokenize(args.prompt.encode("utf-8"), add_bos=True, special=True)
+        )
         if len(prompt_tokens) >= args.n_ctx:
             raise ValueError(
                 f"prompt uses {len(prompt_tokens)} tokens but --n-ctx is only {args.n_ctx}"
@@ -194,12 +214,21 @@ def main() -> None:
 
         print(
             f"Model: {model_path}\n"
-            f"Prompt tokens: {len(prompt_tokens)} · vocab: {llm.n_vocab()} · ctx: {args.n_ctx}",
+            f"Prompt tokens: {len(prompt_tokens)} · vocab: {tokenizer.n_vocab()} · ctx: {args.n_ctx}",
             file=sys.stderr,
         )
-        display = TokenDisplay(llm)
+        display = TokenDisplay(tokenizer)
+        factory = LlamaCursorFactory(
+            model_path=str(model_path),
+            prompt_tokens=prompt_tokens,
+            n_ctx=args.n_ctx,
+            n_batch=args.n_batch,
+            n_gpu_layers=args.n_gpu_layers,
+            threads=args.threads,
+            verbose=args.llama_verbose,
+        )
         run_tui(
-            LlamaCursor(llm, prompt_tokens),
+            factory,
             display,
             title=f"natwalk · llama.cpp · {model_path.name}",
             context=args.prompt,
@@ -208,10 +237,9 @@ def main() -> None:
             budget_nats=args.budget_nats,
             budget_step=args.budget_step,
             lines=args.tree_lines,
-            exit_on_quit=True,
         )
     finally:
-        llm.close()
+        tokenizer.close()
 
 
 if __name__ == "__main__":
