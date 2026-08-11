@@ -7,8 +7,8 @@ from collections.abc import Sequence
 
 from natwalk.tree import Distribution, Tree
 from natwalk.tui import (
-    App,
     _SUGGESTION_STYLE,
+    App,
     _cell_width,
     _clip,
     _context_spans,
