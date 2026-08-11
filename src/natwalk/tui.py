@@ -181,6 +181,25 @@ def _context_text(
     return f"{context} · {suffix}"
 
 
+def _context_spans(
+    context_text: str,
+    suggestion_text: str,
+    decode: DecodeTokens | None,
+) -> tuple[tuple[str, str], ...]:
+    """Compose context and highlighted completion without corrupting exact text."""
+    spans: list[tuple[str, str]] = []
+    if context_text:
+        spans.append((context_text, ""))
+    elif not suggestion_text:
+        spans.append(("∅", ""))
+
+    if context_text and suggestion_text and decode is None:
+        spans.append((" · ", ""))
+    if suggestion_text:
+        spans.append((suggestion_text, "1"))
+    return tuple(spans)
+
+
 def _format_tree_row(
     row: CompactRow,
     describe: DescribeToken,
@@ -372,10 +391,7 @@ def _render(
     if suggestion_text and not suggestion.complete:
         suggestion_text += "…"
     context_lines = _wrap_spans(
-        (
-            (context_text or "∅", ""),
-            (suggestion_text, "1"),
-        ),
+        _context_spans(context_text, suggestion_text, decode_tokens),
         columns,
         color=color,
     )
