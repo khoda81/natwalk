@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 import unittest
 
 from natwalk.search import Search
 from natwalk.tree import Distribution, Tree
-from natwalk.view import View, enter, move, parent, rows
+from natwalk.view import View, compact_rows, enter, forest_nats, move, parent, rows
 
 
 def distribution(*probabilities: float) -> Distribution:
@@ -45,6 +46,41 @@ class ViewTests(unittest.TestCase):
 
         self.assertEqual(len(visible), 7)
         self.assertEqual(len(tree.nodes), 1)
+
+    def test_forest_surprisal_uses_total_probability_mass(self) -> None:
+        dist = distribution(0.6, 0.3, 0.1)
+
+        self.assertAlmostEqual(forest_nats(dist, 1), -math.log(0.4))
+        self.assertAlmostEqual(
+            forest_nats(dist, 1, parent_nats=2.0),
+            2.0 - math.log(0.4),
+        )
+
+    def test_compact_view_collapses_unary_chain_and_keeps_side_forest(self) -> None:
+        tree = Tree(distribution(0.6, 0.4))
+        first = tree.put_child(0, 0, distribution(0.8, 0.2))
+        tree.put_child(first, 0, Distribution((), ()))
+
+        visible = compact_rows(tree, View(), edge_limit=2)
+
+        self.assertEqual(visible[0].tokens, (0, 0))
+        self.assertFalse(visible[0].forest)
+        self.assertEqual(visible[1].tokens, (0,))
+        self.assertTrue(visible[1].forest)
+        self.assertEqual(visible[1].forest_count, 1)
+        self.assertAlmostEqual(
+            visible[1].path_nats,
+            -math.log(0.6) - math.log(0.2),
+        )
+
+    def test_compact_view_leaves_undiscovered_edge_open_ended(self) -> None:
+        tree = Tree(distribution(0.6, 0.4))
+
+        visible = compact_rows(tree, View(), edge_limit=1)
+
+        self.assertEqual(visible[0].tokens, (0,))
+        self.assertTrue(visible[0].open_ended)
+        self.assertIsNone(visible[0].child)
 
     def test_enter_requires_discovered_child(self) -> None:
         tree = Tree(distribution(0.5, 0.3, 0.2))
