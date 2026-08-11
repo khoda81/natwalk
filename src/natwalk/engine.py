@@ -17,6 +17,8 @@ from .tree import NodeId
 type CommandId = int
 type CursorFactory = Callable[[], Cursor]
 
+_DEFAULT_MAX_TREE_BYTES = 2 * 1024**3
+
 
 @dataclass(frozen=True, slots=True)
 class Advance:
@@ -72,13 +74,21 @@ class EngineError(RuntimeError):
 class EngineClient:
     """Client-side process transport plus an idempotent tree replica."""
 
-    def __init__(self, factory: CursorFactory) -> None:
+    def __init__(
+        self,
+        factory: CursorFactory,
+        *,
+        max_tree_bytes: int | None = _DEFAULT_MAX_TREE_BYTES,
+    ) -> None:
+        if max_tree_bytes is not None and max_tree_bytes <= 0:
+            raise ValueError("max_tree_bytes must be positive or None")
+
         context = mp.get_context("spawn")
         self._commands = context.Queue()
         self._events = context.Queue()
         self._process = context.Process(
             target=_run_engine,
-            args=(factory, self._commands, self._events),
+            args=(factory, self._commands, self._events, max_tree_bytes),
             name="natwalk-engine",
             daemon=True,
         )
@@ -213,7 +223,7 @@ class EngineClient:
             )
 
 
-def _run_engine(factory: CursorFactory, commands, events) -> None:
+def _run_engine(factory: CursorFactory, commands, events, max_tree_bytes: int | None) -> None:
     """Own one Session and service commands between synchronous search discoveries."""
     try:
         session = Session(factory())
@@ -258,6 +268,14 @@ def _run_engine(factory: CursorFactory, commands, events) -> None:
             events.put(CommandDone(command.command_id, node))
             return True
 
+        def can_search() -> bool:
+            if max_tree_bytes is None:
+                return True
+            # The authoritative tree and client replica retain approximately the
+            # same packed distribution payload. Commands may cross this soft cap;
+            # only autonomous background discovery is paused.
+            return 2 * session.tree.storage_bytes < max_tree_bytes
+
         publish_tree()
         publish_state()
 
@@ -275,7 +293,7 @@ def _run_engine(factory: CursorFactory, commands, events) -> None:
             if handled:
                 continue
 
-            if session.search.frontier:
+            if session.search.frontier and can_search():
                 session.search.discover()
                 publish_tree()
                 continue
