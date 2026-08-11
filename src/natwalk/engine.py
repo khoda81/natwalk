@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import queue
+import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -98,6 +99,7 @@ class EngineClient:
 
     def __enter__(self) -> EngineClient:
         self.start()
+        self.wait_ready()
         return self
 
     def __exit__(self, *_exc: object) -> None:
@@ -114,9 +116,27 @@ class EngineClient:
     def alive(self) -> bool:
         return self._process.is_alive()
 
+    @property
+    def ready(self) -> bool:
+        return self.root is not None and self.replica.tree is not None
+
     def start(self) -> None:
         if self._process.pid is None:
             self._process.start()
+
+    def wait_ready(self, timeout: float | None = None) -> None:
+        """Wait for the initial root tree and state to arrive from the engine."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.ready:
+            self.poll()
+            if self.ready:
+                return
+            if self._process.pid is not None and not self.alive:
+                self.poll()
+                raise EngineError("engine exited before publishing its initial state")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("engine did not become ready before timeout")
+            time.sleep(0.01)
 
     def command_id(self) -> CommandId:
         command_id = self._next_command
@@ -158,6 +178,11 @@ class EngineClient:
     def done(self, command_id: CommandId) -> CommandDone | None:
         self.poll()
         return self._done.get(command_id)
+
+    def take_done(self, command_id: CommandId) -> CommandDone | None:
+        """Return and forget a completed command, if its result has arrived."""
+        self.poll()
+        return self._done.pop(command_id, None)
 
     def request_stop(self) -> None:
         if self.alive:
@@ -211,9 +236,8 @@ def _run_engine(factory: CursorFactory, commands, events) -> None:
         def publish_tree() -> None:
             nonlocal published
             batch = updates(session.tree, start=published)
-            if batch:
-                events.put(TreeUpdates(batch, len(session.search.frontier)))
-                published += len(batch)
+            events.put(TreeUpdates(batch, len(session.search.frontier)))
+            published += len(batch)
 
         def publish_state() -> None:
             events.put(EngineState(session.root, len(history)))
