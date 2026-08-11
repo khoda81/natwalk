@@ -239,11 +239,9 @@ def _render(
             columns,
         )
     )
-
-    known = sum(node.distribution is not None for node in tree.nodes)
     frame.append(
         _line(
-            f"search {len(tree.nodes)} nodes  ·  {known} distributions"
+            f"search {len(tree.nodes)} nodes  ·  {len(tree.nodes)} distributions"
             f"  ·  {len(session.search.frontier)} frontier",
             columns,
         )
@@ -283,9 +281,7 @@ def _render(
     frame.append(_line(f"focus       {_tokens(describe, focus, limit=10)}", columns))
     frame.append(_line(rule, columns))
 
-    if distribution is None:
-        frame.append(_line("  ⟳ distribution not discovered yet", columns))
-    elif not distribution.tokens:
+    if not distribution.tokens:
         frame.append(_line("  ∅ terminal", columns))
     else:
         selected = min(view.selected_rank, len(distribution) - 1)
@@ -332,6 +328,160 @@ def _render(
     return suggestions, completion_index
 
 
+class App:
+    """Interactive TUI state and key dispatch around one natwalk session."""
+
+    def __init__(
+        self,
+        cursor: Cursor,
+        describe: DescribeToken,
+        *,
+        title: str,
+        max_tokens: int,
+        budget_nats: float,
+        budget_step: float,
+        lines: int | None,
+    ) -> None:
+        self.session = Session(cursor)
+        self.worker = SearchWorker(self.session.search)
+        self.describe = describe
+        self.title = title
+        self.max_tokens = max_tokens
+        self.budget_nats = budget_nats
+        self.budget_step = budget_step
+        self.lines = lines
+
+        self.history: list[Checkpoint] = []
+        self.view = View(node=self.session.root)
+        self.view_history: list[View] = []
+        self.completion_index = 0
+        self.suggestions: tuple[Suggestion, ...] = ()
+        self.debug = False
+        self.quit_requested = False
+        self.last_render = 0.0
+
+    @property
+    def terminal(self) -> bool:
+        return not self.session.tree[self.session.root].distribution.tokens
+
+    def render(self) -> None:
+        self.suggestions, self.completion_index = _render(
+            self.session,
+            self.describe,
+            self.view,
+            title=self.title,
+            budget_nats=self.budget_nats,
+            completion_index=self.completion_index,
+            max_tokens=self.max_tokens,
+            lines=self.lines,
+            debug=self.debug,
+            undo_depth=len(self.history),
+        )
+        self.last_render = time.monotonic()
+
+    def handle_keys(self, keys: tuple[str, ...]) -> bool:
+        """Apply one buffered key burst and return whether the frame changed."""
+        redraw = False
+        for key in keys:
+            redraw = self.handle_key(key) or redraw
+            if self.quit_requested:
+                break
+        return redraw
+
+    def handle_key(self, key: str) -> bool:
+        """Apply one key. Return whether the visible frame changed."""
+        if key.lower() == "q":
+            self.quit_requested = True
+            return False
+        if key.lower() == "d":
+            self.debug = not self.debug
+            return True
+        if key == "[":
+            self.budget_nats = max(0.0, self.budget_nats - self.budget_step)
+            self.completion_index = 0
+            return True
+        if key == "]":
+            self.budget_nats += self.budget_step
+            self.completion_index = 0
+            return True
+        if key == "TAB" and self.suggestions:
+            self.completion_index = (self.completion_index + 1) % len(self.suggestions)
+            return True
+        if key == "BACKTAB" and self.suggestions:
+            self.completion_index = (self.completion_index - 1) % len(self.suggestions)
+            return True
+        if key == "UP":
+            self.view = move(self.session.tree, self.view, -1)
+            return True
+        if key == "DOWN":
+            self.view = move(self.session.tree, self.view, 1)
+            return True
+        if key == "LEFT" and self.view.node != self.session.root:
+            self._leave_child()
+            return True
+        if key in ("\x7f", "\b"):
+            return self._undo()
+        if key in (" ", "\r", "\n"):
+            return self._accept()
+        if key == "RIGHT":
+            return self._enter_child()
+        return False
+
+    def _leave_child(self) -> None:
+        if self.view_history:
+            self.view = self.view_history.pop()
+        else:
+            self.view = parent(self.session.tree, self.view)
+
+    def _undo(self) -> bool:
+        if not self.history:
+            return False
+        with self.worker.access():
+            self.session.restore(self.history.pop())
+        self._reset_view()
+        return True
+
+    def _accept(self) -> bool:
+        suggestion = self._selected_suggestion()
+        if not suggestion.tokens:
+            return False
+        with self.worker.access():
+            self.history.append(self.session.checkpoint())
+            self.session.commit(suggestion.tokens)
+        self._reset_view()
+        return True
+
+    def _selected_suggestion(self) -> Suggestion:
+        if self.suggestions:
+            return self.suggestions[self.completion_index % len(self.suggestions)]
+        return greedy(
+            self.session.tree,
+            self.session.root,
+            max_nats=self.budget_nats,
+            max_tokens=self.max_tokens,
+        )
+
+    def _enter_child(self) -> bool:
+        distribution = self.session.tree[self.view.node].distribution
+        if not distribution.tokens:
+            return False
+
+        selected = min(self.view.selected_rank, len(distribution) - 1)
+        child = self.session.tree.child(self.view.node, selected)
+        if child is None:
+            with self.worker.access():
+                child = self.session.inspect_child(self.view.node, selected)
+
+        self.view_history.append(self.view)
+        self.view = View(node=child)
+        return True
+
+    def _reset_view(self) -> None:
+        self.view = View(node=self.session.root)
+        self.view_history.clear()
+        self.completion_index = 0
+
+
 def run_tui(
     cursor: Cursor,
     describe: DescribeToken,
@@ -349,145 +499,39 @@ def run_tui(
     the terminal and then terminates the process immediately instead of waiting
     for an uninterruptible native model call in the daemon search thread.
     """
-    session = Session(cursor)
-    history: list[Checkpoint] = []
-    view = View(node=session.root)
-    view_history: list[View] = []
-    completion_index = 0
-    debug = False
-    worker: SearchWorker | None = None
+    app = App(
+        cursor,
+        describe,
+        title=title,
+        max_tokens=max_tokens,
+        budget_nats=budget_nats,
+        budget_step=budget_step,
+        lines=lines,
+    )
     exit_code: int | None = None
 
     try:
         with _terminal():
-            suggestions, completion_index = _render(
-                session,
-                describe,
-                view,
-                title=title,
-                budget_nats=budget_nats,
-                completion_index=completion_index,
-                max_tokens=max_tokens,
-                lines=lines,
-                debug=debug,
-                undo_depth=len(history),
-            )
-            root_distribution = session.tree[session.root].distribution
-            if root_distribution is not None and not root_distribution.tokens:
+            app.render()
+            if app.terminal:
                 return
 
-            last_render = time.monotonic()
-            worker = SearchWorker(session.search)
-            worker.start()
-
-            while True:
-                worker.raise_if_failed()
-                keys = _read_keys()
-                dirty = False
-                quit_requested = False
-
-                for key in keys:
-                    if key.lower() == "q":
-                        quit_requested = True
-                        break
-                    if key.lower() == "d":
-                        debug = not debug
-                        dirty = True
-                    elif key == "[":
-                        budget_nats = max(0.0, budget_nats - budget_step)
-                        completion_index = 0
-                        dirty = True
-                    elif key == "]":
-                        budget_nats += budget_step
-                        completion_index = 0
-                        dirty = True
-                    elif key == "TAB" and suggestions:
-                        completion_index = (completion_index + 1) % len(suggestions)
-                        dirty = True
-                    elif key == "BACKTAB" and suggestions:
-                        completion_index = (completion_index - 1) % len(suggestions)
-                        dirty = True
-                    elif key == "UP":
-                        view = move(session.tree, view, -1)
-                        dirty = True
-                    elif key == "DOWN":
-                        view = move(session.tree, view, 1)
-                        dirty = True
-                    elif key == "LEFT" and view.node != session.root:
-                        if view_history:
-                            view = view_history.pop()
-                        else:
-                            view = parent(session.tree, view)
-                        dirty = True
-                    elif key in ("\x7f", "\b"):
-                        if history:
-                            with worker.access():
-                                session.restore(history.pop())
-                            view = View(node=session.root)
-                            view_history.clear()
-                            completion_index = 0
-                            dirty = True
-                    elif key in (" ", "\r", "\n"):
-                        if suggestions:
-                            suggestion = suggestions[completion_index % len(suggestions)]
-                        else:
-                            suggestion = greedy(
-                                session.tree,
-                                session.root,
-                                max_nats=budget_nats,
-                                max_tokens=max_tokens,
-                            )
-                        if suggestion.tokens:
-                            with worker.access():
-                                history.append(session.checkpoint())
-                                session.commit(suggestion.tokens)
-                            view = View(node=session.root)
-                            view_history.clear()
-                            completion_index = 0
-                            dirty = True
-                    elif key == "RIGHT":
-                        distribution = session.tree[view.node].distribution
-                        if distribution is not None and distribution.tokens:
-                            selected = min(view.selected_rank, len(distribution) - 1)
-                            child = session.tree[view.node].children.get(selected)
-                            if child is None or session.tree[child].distribution is None:
-                                with worker.access():
-                                    child = session.inspect_child(view.node, selected)
-                            view_history.append(view)
-                            view = View(node=child)
-                            dirty = True
-
-                if quit_requested:
+            app.worker.start()
+            while not app.terminal:
+                app.worker.raise_if_failed()
+                redraw = app.handle_keys(_read_keys())
+                if app.quit_requested:
                     exit_code = 0
                     break
-
-                now = time.monotonic()
-                if dirty or now - last_render >= _REDRAW_SECONDS:
-                    suggestions, completion_index = _render(
-                        session,
-                        describe,
-                        view,
-                        title=title,
-                        budget_nats=budget_nats,
-                        completion_index=completion_index,
-                        max_tokens=max_tokens,
-                        lines=lines,
-                        debug=debug,
-                        undo_depth=len(history),
-                    )
-                    last_render = now
-
-                root_distribution = session.tree[session.root].distribution
-                if root_distribution is not None and not root_distribution.tokens:
-                    break
+                if redraw or time.monotonic() - app.last_render >= _REDRAW_SECONDS:
+                    app.render()
     except KeyboardInterrupt:
         exit_code = 130
     finally:
-        if worker is not None:
-            if exit_code is not None and exit_on_quit:
-                worker.request_stop()
-            else:
-                worker.close()
+        if exit_code is not None and exit_on_quit:
+            app.worker.request_stop()
+        else:
+            app.worker.close()
 
     if exit_code is not None and exit_on_quit:
         os._exit(exit_code)
