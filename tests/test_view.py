@@ -5,16 +5,7 @@ import unittest
 
 from natwalk.search import Search
 from natwalk.tree import Distribution, Tree
-from natwalk.view import (
-    View,
-    compact_rows,
-    enter,
-    forest_nats,
-    move,
-    parent,
-    partition_rows,
-    rows,
-)
+from natwalk.view import View, enter, forest_nats, move, parent, partition_rows, rows
 
 
 def distribution(*probabilities: float) -> Distribution:
@@ -95,11 +86,11 @@ class ViewTests(unittest.TestCase):
         three = partition_rows(tree, View(), row_limit=3)
         four = partition_rows(tree, View(), row_limit=4)
 
-        self.assertEqual([row.tokens for row in three], [(0,), (1,), (2,)])
-        self.assertEqual(
-            [row.tokens for row in four],
-            [(0, 0), (0, 1), (1,), (2,)],
-        )
+        def paths(visible):
+            return [(*tree.path_from(tree.root, row.parent), *row.tokens) for row in visible]
+
+        self.assertEqual(paths(three), [(0,), (1,), (2,)])
+        self.assertEqual(paths(four), [(0, 0), (0, 1), (1,), (2,)])
         self.assertAlmostEqual(
             max(row.path_nats for row in three),
             -math.log(0.15),
@@ -110,31 +101,25 @@ class ViewTests(unittest.TestCase):
         )
         self.assertIsNotNone(first)
 
-    def test_compact_view_collapses_unary_chain_and_keeps_side_forest(self) -> None:
+    def test_partition_layout_factors_shared_prefixes_without_extra_rows(self) -> None:
         tree = Tree(distribution(0.6, 0.4))
         first = tree.put_child(0, 0, distribution(0.8, 0.2))
-        tree.put_child(first, 0, Distribution((), ()))
+        second = tree.put_child(first, 0, distribution(0.7, 0.3))
 
-        visible = compact_rows(tree, View(), edge_limit=2)
+        visible = partition_rows(tree, View(), row_limit=4)
 
-        self.assertEqual(visible[0].tokens, (0, 0))
-        self.assertFalse(visible[0].forest)
-        self.assertEqual(visible[1].tokens, (0,))
-        self.assertTrue(visible[1].forest)
-        self.assertEqual(visible[1].forest_count, 1)
-        self.assertAlmostEqual(
-            visible[1].path_nats,
-            -math.log(0.6) - math.log(0.2),
+        self.assertEqual(len(visible), 4)
+        self.assertEqual(
+            [(*tree.path_from(tree.root, row.parent), *row.tokens) for row in visible],
+            [(0, 0, 0), (0, 0, 1), (0, 1), (1,)],
         )
-
-    def test_compact_view_leaves_undiscovered_edge_open_ended(self) -> None:
-        tree = Tree(distribution(0.6, 0.4))
-
-        visible = compact_rows(tree, View(), edge_limit=1)
-
-        self.assertEqual(visible[0].tokens, (0,))
-        self.assertTrue(visible[0].open_ended)
-        self.assertIsNone(visible[0].child)
+        self.assertEqual([row.tokens for row in visible], [(0, 0, 0), (1,), (1,), (1,)])
+        self.assertEqual([row.depth for row in visible], [0, 2, 1, 0])
+        self.assertEqual(visible[1].parent, second)
+        self.assertEqual(len(visible[1].ancestor_last), 2)
+        self.assertEqual(len(visible[1].ancestor_nats), 2)
+        self.assertAlmostEqual(visible[1].ancestor_nats[0], -math.log(0.6))
+        self.assertAlmostEqual(visible[1].ancestor_nats[1], -math.log(0.6 * 0.8))
 
     def test_enter_requires_discovered_child(self) -> None:
         tree = Tree(distribution(0.5, 0.3, 0.2))
