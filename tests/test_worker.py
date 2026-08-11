@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 
 from natwalk.search import Search
@@ -26,37 +27,40 @@ class WorkerTests(unittest.TestCase):
         visited: list[tuple[int, ...]] = []
         done = threading.Event()
 
-        def evaluate(tree: Tree, node: int) -> Distribution:
-            path = tree.path(node)
+        def evaluate(tree: Tree, parent: int, rank: int) -> Distribution:
+            token = tree[parent].distribution.tokens[rank]
+            path = (*tree.path(parent), token)
             visited.append(path)
-            if len(visited) == len(table):
+            if len(visited) == 2:
                 done.set()
             return table[path]
 
-        tree = Tree()
+        tree = Tree(table[()])
         search = Search(tree, evaluate)
         with SearchWorker(search):
             self.assertTrue(done.wait(1.0))
 
-        self.assertEqual(visited, [(), (0,), (1,)])
+        self.assertEqual(visited, [(0,), (1,)])
         self.assertEqual(search.frontier, [])
 
     def test_foreground_reset_wakes_idle_worker(self) -> None:
         expanded = threading.Event()
 
-        def evaluate(tree: Tree, node: int) -> Distribution:
-            if node != tree.root:
-                expanded.set()
+        def evaluate(tree: Tree, parent: int, rank: int) -> Distribution:
+            expanded.set()
             return Distribution((), ())
 
-        tree = Tree()
+        tree = Tree(Distribution((), ()))
         search = Search(tree, evaluate)
         worker = SearchWorker(search)
 
         with worker:
             with worker.access():
-                tree[tree.root].distribution = distribution(1.0)
-                search.reset(tree.root)
+                tree = search.tree
+                root_distribution = distribution(1.0)
+                search.tree = Tree(root_distribution)
+                worker.search = search
+                search.reset(search.tree.root)
             self.assertTrue(expanded.wait(1.0))
 
     def test_waiting_foreground_runs_before_next_search_step(self) -> None:
@@ -67,7 +71,7 @@ class WorkerTests(unittest.TestCase):
         second_step_started = threading.Event()
         evaluations = 0
 
-        def evaluate(tree: Tree, node: int) -> Distribution:
+        def evaluate(tree: Tree, parent: int, rank: int) -> Distribution:
             nonlocal evaluations
             evaluations += 1
             if evaluations == 1:
@@ -77,8 +81,7 @@ class WorkerTests(unittest.TestCase):
                 second_step_started.set()
             return Distribution((), ())
 
-        tree = Tree()
-        tree[tree.root].distribution = distribution(0.6, 0.4)
+        tree = Tree(distribution(0.6, 0.4))
         search = Search(tree, evaluate)
 
         with SearchWorker(search) as worker:
@@ -99,16 +102,35 @@ class WorkerTests(unittest.TestCase):
             thread.join(1.0)
             self.assertFalse(thread.is_alive())
 
+    def test_request_stop_does_not_wait_for_current_search_step(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def evaluate(tree: Tree, parent: int, rank: int) -> Distribution:
+            started.set()
+            release.wait(1.0)
+            return Distribution((), ())
+
+        worker = SearchWorker(Search(Tree(distribution(1.0)), evaluate))
+        worker.start()
+        self.assertTrue(started.wait(1.0))
+
+        before = time.monotonic()
+        worker.request_stop()
+        elapsed = time.monotonic() - before
+
+        self.assertLess(elapsed, 0.1)
+        release.set()
+        worker.join()
+
     def test_worker_failure_is_raised_in_foreground(self) -> None:
         failed = threading.Event()
 
-        def evaluate(tree: Tree, node: int) -> Distribution:
-            if node == tree.root:
-                return distribution(1.0)
+        def evaluate(tree: Tree, parent: int, rank: int) -> Distribution:
             failed.set()
             raise ValueError("model exploded")
 
-        tree = Tree()
+        tree = Tree(distribution(1.0))
         search = Search(tree, evaluate)
         with SearchWorker(search) as worker:
             self.assertTrue(failed.wait(1.0))
