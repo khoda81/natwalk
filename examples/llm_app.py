@@ -166,8 +166,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-gpu-layers",
         type=int,
-        default=0,
-        help="llama.cpp GPU-offloaded layers; requires a GPU-enabled llama-cpp-python build",
+        default=-1,
+        help="layers to offload to GPU; -1 means all layers, 0 forces CPU",
     )
     parser.add_argument("--threads", type=int)
     parser.add_argument("--max-tokens", type=int, default=128)
