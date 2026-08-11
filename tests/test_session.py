@@ -57,27 +57,36 @@ class SessionTests(unittest.TestCase):
         checkpoint = session.checkpoint()
         root = session.commit((0, 1))
         known_nodes = len(session.tree.nodes)
-        self.assertIsNotNone(session.tree[root].distribution)
 
         session.restore(checkpoint)
 
         self.assertEqual(cursor.prefix, ())
         self.assertEqual(session.root, session.tree.root)
         self.assertEqual(len(session.tree.nodes), known_nodes)
-        self.assertIsNotNone(session.tree[root].distribution)
+        self.assertEqual(session.tree[root].distribution.tokens, (0,))
 
-    def test_inspection_caches_distribution_without_changing_frontier_or_cursor(self) -> None:
+    def test_inspect_child_publishes_complete_node_without_changing_frontier_or_cursor(self) -> None:
         cursor = TableCursor(self.make_table())
         session = Session(cursor)
-        child = session.tree.child(session.root, 1)
         frontier = tuple(session.search.frontier)
 
-        distribution = session.inspect(child)
+        child = session.inspect_child(session.root, 1)
 
-        self.assertEqual(distribution.tokens, (0, 1))
+        self.assertEqual(session.tree[child].distribution.tokens, (0, 1))
         self.assertEqual(cursor.prefix, ())
         self.assertEqual(tuple(session.search.frontier), frontier)
-        self.assertIs(session.tree[child].distribution, distribution)
+        self.assertEqual(session.tree.child(session.root, 1), child)
+
+    def test_repeated_inspect_child_is_idempotent(self) -> None:
+        cursor = TableCursor(self.make_table())
+        session = Session(cursor)
+
+        first = session.inspect_child(session.root, 1)
+        before = len(session.tree.nodes)
+        second = session.inspect_child(session.root, 1)
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(session.tree.nodes), before)
 
     def test_empty_commit_is_noop(self) -> None:
         cursor = TableCursor(self.make_table())
