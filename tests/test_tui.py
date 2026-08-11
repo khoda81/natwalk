@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import math
 import time
 import unittest
 from collections.abc import Sequence
 
+from natwalk.tree import Distribution, Tree
 from natwalk.tui import (
     App,
+    _SUGGESTION_STYLE,
     _cell_width,
     _clip,
     _context_spans,
@@ -13,9 +16,11 @@ from natwalk.tui import (
     _fit,
     _format_forest_summary,
     _format_tree_row,
+    _relative_probability,
+    _row_display_nats,
     _wrap_spans,
 )
-from natwalk.view import CompactRow
+from natwalk.view import CompactRow, View
 
 
 class SlowChildCursor:
@@ -93,7 +98,7 @@ class TerminalWidthTests(unittest.TestCase):
 
     def test_context_wrap_keeps_suggestion_span_intact(self) -> None:
         lines = _wrap_spans(
-            (("The interesting thing is", ""), (" that it", "7")),
+            (("The interesting thing is", ""), (" that it", _SUGGESTION_STYLE)),
             24,
             color=False,
         )
@@ -118,7 +123,7 @@ class TerminalWidthTests(unittest.TestCase):
             (
                 ("tie · t=0.21s", ""),
                 (" · ", ""),
-                ("acoustic_guitar", "1"),
+                ("acoustic_guitar", _SUGGESTION_STYLE),
             ),
         )
 
@@ -132,8 +137,36 @@ class TerminalWidthTests(unittest.TestCase):
             spans,
             (
                 ("information theory is", ""),
-                (" that it", "1"),
+                (" that it", _SUGGESTION_STYLE),
             ),
+        )
+
+    def test_relative_probability_is_probability_ratio(self) -> None:
+        self.assertEqual(_relative_probability(2.0, 2.0), 1.0)
+        self.assertAlmostEqual(_relative_probability(3.0, 2.0), math.exp(-1.0))
+        self.assertEqual(_relative_probability(math.inf, 2.0), 0.0)
+
+    def test_row_number_stays_relative_to_committed_root(self) -> None:
+        root = Distribution(tokens=(10,), probabilities=(0.5,))
+        tree = Tree(root)
+        child = tree.put_child(0, 0, Distribution(tokens=(20,), probabilities=(0.8,)))
+        view = View(node=child)
+        row = CompactRow(
+            parent=child,
+            rank=0,
+            depth=0,
+            ancestor_last=(),
+            is_last=True,
+            tokens=(20,),
+            edge_nats=-math.log(0.8),
+            path_nats=-math.log(0.8),
+            child=None,
+            open_ended=True,
+        )
+
+        self.assertAlmostEqual(
+            _row_display_nats(tree, tree.root, view, row),
+            -math.log(0.5) - math.log(0.8),
         )
 
 
