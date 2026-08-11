@@ -190,10 +190,16 @@ class Tree:
 
     def __init__(self, root_distribution: Distribution) -> None:
         self.nodes: list[Node] = [Node(parent=None, rank=-1, distribution=root_distribution)]
+        self._storage_bytes = root_distribution.storage_bytes
 
     @property
     def root(self) -> NodeId:
         return 0
+
+    @property
+    def storage_bytes(self) -> int:
+        """Packed distribution payload retained by this tree."""
+        return self._storage_bytes
 
     def __getitem__(self, node: NodeId) -> Node:
         return self.nodes[node]
@@ -223,6 +229,7 @@ class Tree:
         child_id = len(self.nodes)
         child = Node(parent=parent_id, rank=rank, distribution=distribution)
         self.nodes.append(child)
+        self._storage_bytes += distribution.storage_bytes
         parent._children[rank] = child_id
         return child_id
 
