@@ -65,7 +65,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(len(session.tree.nodes), known_nodes)
         self.assertEqual(session.tree[root].distribution.tokens, (0,))
 
-    def test_inspect_child_publishes_complete_node_without_changing_frontier_or_cursor(self) -> None:
+    def test_inspect_child_publishes_complete_node(self) -> None:
         cursor = TableCursor(self.make_table())
         session = Session(cursor)
         frontier = tuple(session.search.frontier)
