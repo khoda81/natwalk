@@ -1161,9 +1161,8 @@ class App:
             if len(distribution):
                 self.engine.reveal(self.view.node, _REVEAL_PAGE)
             return False
-        if (
-            self.view.selected_rank >= distribution.revealed - 1
-            and distribution.revealed < len(distribution)
+        if self.view.selected_rank >= distribution.revealed - 1 and distribution.revealed < len(
+            distribution
         ):
             self.engine.reveal(self.view.node, distribution.revealed + _REVEAL_PAGE)
             return False
