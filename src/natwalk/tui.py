@@ -126,9 +126,7 @@ def _viridis(probability: float) -> str:
     left = _VIRIDIS[lower]
     right = _VIRIDIS[lower + 1]
     rgb = tuple(round(a + (b - a) * fraction) for a, b in zip(left, right, strict=True))
-    rgb = tuple(
-        round(channel + (255 - channel) * _VIRIDIS_WHITE_MIX) for channel in rgb
-    )
+    rgb = tuple(round(channel + (255 - channel) * _VIRIDIS_WHITE_MIX) for channel in rgb)
     return f"38;2;{rgb[0]};{rgb[1]};{rgb[2]}"
 
 
@@ -377,9 +375,7 @@ def _format_tree_row(
         if was_last:
             ancestor_parts.append("   ")
         else:
-            ancestor_style = _grayscale(
-                _relative_probability(ancestor_nats, branch_reference)
-            )
+            ancestor_style = _grayscale(_relative_probability(ancestor_nats, branch_reference))
             ancestor_parts.append(_paint("│  ", ancestor_style, color=color))
     ancestors = "".join(ancestor_parts)
 
