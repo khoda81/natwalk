@@ -28,6 +28,8 @@ _REDRAW_SECONDS = 0.25
 _SUGGESTION_STYLE = "1;38;5;45"
 _SELECTED_STYLE = "1;38;5;220"
 _FOREST_STYLE = "2;38;5;244"
+_VIRIDIS_GAMMA = 0.35
+_VIRIDIS_WHITE_MIX = 0.18
 _VIRIDIS = (
     (68, 1, 84),
     (59, 82, 139),
@@ -115,14 +117,18 @@ def _relative_probability(nats: float, reference_nats: float) -> float:
 
 
 def _viridis(probability: float) -> str:
-    """Return a truecolor viridis foreground for a scalar in ``[0, 1]``."""
-    value = min(1.0, max(0.0, probability))
+    """Return a readable truecolor viridis foreground for a probability ratio."""
+    probability = min(1.0, max(0.0, probability))
+    value = probability**_VIRIDIS_GAMMA
     position = value * (len(_VIRIDIS) - 1)
     lower = min(int(position), len(_VIRIDIS) - 2)
     fraction = position - lower
     left = _VIRIDIS[lower]
     right = _VIRIDIS[lower + 1]
     rgb = tuple(round(a + (b - a) * fraction) for a, b in zip(left, right, strict=True))
+    rgb = tuple(
+        round(channel + (255 - channel) * _VIRIDIS_WHITE_MIX) for channel in rgb
+    )
     return f"38;2;{rgb[0]};{rgb[1]};{rgb[2]}"
 
 
@@ -136,6 +142,25 @@ def _grayscale(probability: float) -> str:
 def _minimum_finite(values) -> float:
     finite = [value for value in values if math.isfinite(value)]
     return min(finite) if finite else math.inf
+
+
+def _ancestor_branch_nats(
+    rows: tuple[CompactRow, ...],
+    branch_nats: list[float],
+) -> tuple[tuple[float, ...], ...]:
+    """Recover the macro-edge weight represented by each visible ancestor column."""
+    if len(rows) != len(branch_nats):
+        raise ValueError("row and branch-nat counts must match")
+
+    stack: list[float] = []
+    result: list[tuple[float, ...]] = []
+    for row, current_nats in zip(rows, branch_nats, strict=True):
+        if row.depth > len(stack):
+            raise ValueError("compact rows must be in depth-first order")
+        del stack[row.depth :]
+        result.append(tuple(stack))
+        stack.append(current_nats)
+    return tuple(result)
 
 
 def _wrap_spans(
@@ -327,17 +352,36 @@ def _format_tree_row(
     nat_reference: float | None = None,
     branch_nats: float | None = None,
     branch_reference: float | None = None,
+    ancestor_branch_nats: tuple[float, ...] | None = None,
     token_styles: tuple[str, ...] | None = None,
 ) -> str:
     display_nats = row.path_nats if display_nats is None else display_nats
     nat_reference = display_nats if nat_reference is None else nat_reference
     branch_nats = row.edge_nats if branch_nats is None else branch_nats
     branch_reference = branch_nats if branch_reference is None else branch_reference
+    if ancestor_branch_nats is None:
+        ancestor_branch_nats = (branch_nats,) * len(row.ancestor_last)
+    if len(ancestor_branch_nats) != len(row.ancestor_last):
+        raise ValueError("ancestor branch-nat count must match tree depth")
 
     marker = "❯ " if selected else "  "
-    ancestors = "".join("   " if was_last else "│  " for was_last in row.ancestor_last)
     branch = "└─ " if row.is_last else "├─ "
     glyph_style = _grayscale(_relative_probability(branch_nats, branch_reference))
+
+    ancestor_parts: list[str] = []
+    for was_last, ancestor_nats in zip(
+        row.ancestor_last,
+        ancestor_branch_nats,
+        strict=True,
+    ):
+        if was_last:
+            ancestor_parts.append("   ")
+        else:
+            ancestor_style = _grayscale(
+                _relative_probability(ancestor_nats, branch_reference)
+            )
+            ancestor_parts.append(_paint("│  ", ancestor_style, color=color))
+    ancestors = "".join(ancestor_parts)
 
     if token_styles is None:
         fallback = _SELECTED_STYLE if selected else (_FOREST_STYLE if row.forest else "")
@@ -360,7 +404,7 @@ def _format_tree_row(
         0,
         columns
         - _cell_width(marker)
-        - _cell_width(ancestors)
+        - 3 * len(row.ancestor_last)
         - _cell_width(branch)
         - _cell_width(suffix),
     )
@@ -369,7 +413,7 @@ def _format_tree_row(
 
     return (
         _paint(marker, _SELECTED_STYLE if selected else "", color=color)
-        + _paint(ancestors, glyph_style, color=color)
+        + ancestors
         + _paint(branch, glyph_style, color=color)
         + label
         + _paint(suffix, nat_style, color=color)
@@ -608,6 +652,7 @@ def _render(
             _row_branch_nats(tree, root, display_nats, row)
             for row, display_nats in zip(visible, row_display_nats, strict=True)
         ]
+        row_ancestor_branch_nats = _ancestor_branch_nats(visible, row_branch_nats)
 
         nat_reference = _minimum_finite(
             [
@@ -640,10 +685,11 @@ def _render(
                 )
             )
 
-        for row, display_nats, branch_nats in zip(
+        for row, display_nats, branch_nats, ancestor_branch_nats in zip(
             visible,
             row_display_nats,
             row_branch_nats,
+            row_ancestor_branch_nats,
             strict=True,
         ):
             row_selected = not row.forest and row.parent == view.node and row.rank == selected
@@ -658,6 +704,7 @@ def _render(
                     nat_reference=nat_reference,
                     branch_nats=branch_nats,
                     branch_reference=branch_reference,
+                    ancestor_branch_nats=ancestor_branch_nats,
                     token_styles=_row_token_styles(
                         tree,
                         view,
