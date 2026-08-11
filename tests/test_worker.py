@@ -44,24 +44,32 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(search.frontier, [])
 
     def test_foreground_reset_wakes_idle_worker(self) -> None:
-        expanded = threading.Event()
+        first_step = threading.Event()
+        second_step = threading.Event()
 
-        def evaluate(tree: Tree, parent: int, rank: int) -> Distribution:
-            expanded.set()
-            return Distribution((), ())
+        class CountingSearch(Search):
+            def __init__(self, tree, evaluate):
+                self.steps = 0
+                super().__init__(tree, evaluate)
 
-        tree = Tree(Distribution((), ()))
-        search = Search(tree, evaluate)
-        worker = SearchWorker(search)
+            def step(self):
+                result = super().step()
+                self.steps += 1
+                if self.steps == 1:
+                    first_step.set()
+                elif self.steps == 2:
+                    second_step.set()
+                return result
 
-        with worker:
+        tree = Tree(distribution(1.0))
+        tree.put_child(0, 0, Distribution((), ()))
+        search = CountingSearch(tree, lambda *_: Distribution((), ()))
+
+        with SearchWorker(search) as worker:
+            self.assertTrue(first_step.wait(1.0))
             with worker.access():
-                tree = search.tree
-                root_distribution = distribution(1.0)
-                search.tree = Tree(root_distribution)
-                worker.search = search
-                search.reset(search.tree.root)
-            self.assertTrue(expanded.wait(1.0))
+                search.reset(tree.root)
+            self.assertTrue(second_step.wait(1.0))
 
     def test_waiting_foreground_runs_before_next_search_step(self) -> None:
         first_step_started = threading.Event()
