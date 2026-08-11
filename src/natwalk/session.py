@@ -23,10 +23,11 @@ class Session:
 
     def __init__(self, cursor: Cursor) -> None:
         self.cursor = cursor
-        self.tree = Tree()
+        root_distribution = rank(cursor.predict())
+        self.tree = Tree(root_distribution)
         self.root = self.tree.root
         self._root_checkpoint = cursor.checkpoint()
-        self.search = Search(self.tree, self._evaluate, root=self.root)
+        self.search = Search(self.tree, self._evaluate_child, root=self.root)
 
     def checkpoint(self) -> Checkpoint:
         return Checkpoint(self.root, self._root_checkpoint)
@@ -40,32 +41,39 @@ class Session:
 
     def distribution(self) -> Distribution:
         """Return the complete distribution at the current committed root."""
-        node = self.tree[self.root]
-        if node.distribution is None:
-            node.distribution = rank(self.cursor.predict())
-        return node.distribution
+        return self.tree[self.root].distribution
 
     def inspect(self, node_id: NodeId) -> Distribution:
-        """Cache one descendant distribution without changing Dijkstra scheduling."""
-        node = self.tree[node_id]
-        if node.distribution is None:
-            node.distribution = self._evaluate(self.tree, node_id)
-        return node.distribution
+        """Return one already-discovered node distribution."""
+        return self.tree[node_id].distribution
 
     def inspect_child(self, parent_id: NodeId, rank_index: int) -> NodeId:
-        """Materialize and inspect one ranked child as a single Session mutation."""
-        distribution = self.inspect(parent_id)
+        """Evaluate and publish one ranked child if it is not already discovered."""
+        distribution = self.tree[parent_id].distribution
         if not 0 <= rank_index < len(distribution):
             raise IndexError(rank_index)
-        child = self.tree.child(parent_id, rank_index)
-        self.inspect(child)
-        return child
 
-    def _evaluate(self, tree: Tree, node_id: NodeId) -> Distribution:
+        child = self.tree.child(parent_id, rank_index)
+        if child is not None:
+            return child
+
+        child_distribution = self._evaluate_child(self.tree, parent_id, rank_index)
+        return self.tree.put_child(parent_id, rank_index, child_distribution)
+
+    def _evaluate_child(
+        self,
+        tree: Tree,
+        parent_id: NodeId,
+        rank_index: int,
+    ) -> Distribution:
+        parent_distribution = tree[parent_id].distribution
+        token = parent_distribution.tokens[rank_index]
+
         self.cursor.restore(self._root_checkpoint)
         try:
-            for token in tree.path_from(self.root, node_id):
-                self.cursor.observe(token)
+            for prefix_token in tree.path_from(self.root, parent_id):
+                self.cursor.observe(prefix_token)
+            self.cursor.observe(token)
             return rank(self.cursor.predict())
         finally:
             self.cursor.restore(self._root_checkpoint)
@@ -75,10 +83,16 @@ class Session:
         old_root = self.root
 
         for token in tokens:
-            distribution = self.distribution()
+            parent = self.root
+            distribution = self.tree[parent].distribution
             rank_index = distribution.tokens.index(token)
-            self.root = self.tree.child(self.root, rank_index)
+            child = self.tree.child(parent, rank_index)
+
             self.cursor.observe(token)
+            if child is None:
+                child_distribution = rank(self.cursor.predict())
+                child = self.tree.put_child(parent, rank_index, child_distribution)
+            self.root = child
 
         if self.root != old_root:
             self._root_checkpoint = self.cursor.checkpoint()
