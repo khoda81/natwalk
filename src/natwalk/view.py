@@ -433,17 +433,13 @@ def _partition_layout_rows(
         parent = _partition_node(tree, root, common_ranks)
 
         ancestor_prefixes = tuple(
-            event.ranks[:depth]
-            for depth in range(common)
-            if event.ranks[:depth] in branch_prefixes
+            event.ranks[:depth] for depth in range(common) if event.ranks[:depth] in branch_prefixes
         )
         ancestor_last = tuple(
-            event.ranks[len(prefix)] == children[prefix][-1]
-            for prefix in ancestor_prefixes
+            event.ranks[len(prefix)] == children[prefix][-1] for prefix in ancestor_prefixes
         )
         ancestor_nats = tuple(
-            edge_nats[(prefix, event.ranks[len(prefix)])]
-            for prefix in ancestor_prefixes
+            edge_nats[(prefix, event.ranks[len(prefix)])] for prefix in ancestor_prefixes
         )
 
         branch_prefix = common_ranks
