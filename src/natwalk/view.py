@@ -34,7 +34,7 @@ class Row:
 
 
 def iter_rows(tree: Tree, view: View):
-    """Yield the view's known tree in DFS order without mutating it."""
+    """Yield the view's discovered tree in DFS order without mutating it."""
 
     def visit(
         parent_id: NodeId,
@@ -43,14 +43,10 @@ def iter_rows(tree: Tree, view: View):
         ancestor_last: tuple[bool, ...],
         parent_nats: float,
     ):
-        parent = tree[parent_id]
-        distribution = parent.distribution
-        if distribution is None:
-            return
+        distribution = tree[parent_id].distribution
 
         for rank in range(first_rank, len(distribution)):
-            child_id = parent.children.get(rank)
-            child = tree[child_id] if child_id is not None else None
+            child_id = tree.child(parent_id, rank)
             is_last = rank == len(distribution) - 1
             edge_nats = distribution.nats(rank)
             path_nats = parent_nats + edge_nats
@@ -64,9 +60,9 @@ def iter_rows(tree: Tree, view: View):
                 edge_nats=edge_nats,
                 path_nats=path_nats,
                 child=child_id,
-                expanded=child is not None and child.distribution is not None,
+                expanded=child_id is not None,
             )
-            if child is not None and child.distribution is not None:
+            if child_id is not None:
                 yield from visit(
                     child_id,
                     0,
@@ -84,8 +80,10 @@ def rows(tree: Tree, view: View, limit: int) -> tuple[Row, ...]:
 
 
 def enter(tree: Tree, view: View) -> View:
-    """Focus the selected child, materializing only its node identity."""
+    """Focus the selected child if it has already been discovered."""
     child = tree.child(view.node, view.selected_rank)
+    if child is None:
+        raise ValueError("cannot enter an undiscovered child")
     return View(node=child)
 
 
@@ -100,7 +98,7 @@ def parent(tree: Tree, view: View) -> View:
 def move(tree: Tree, view: View, delta: int) -> View:
     """Move selection within the currently visible sibling tail."""
     distribution = tree[view.node].distribution
-    if distribution is None or not distribution.tokens:
+    if not distribution.tokens:
         return view
     selected = min(max(view.selected_rank + delta, view.first_rank), len(distribution) - 1)
     return View(node=view.node, first_rank=view.first_rank, selected_rank=selected)
