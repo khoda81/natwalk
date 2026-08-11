@@ -47,11 +47,6 @@ class ReplicaDistribution:
         return len(self._tokens)
 
     @property
-    def tokens(self):
-        """Read-only-by-convention revealed prefix for the legacy TUI path."""
-        return self._tokens
-
-    @property
     def storage_bytes(self) -> int:
         return (
             self._tokens.itemsize * len(self._tokens)
