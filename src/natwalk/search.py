@@ -7,9 +7,9 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .tree import Distribution, NodeId, Tree
+from .tree import NodeId, RankedDistribution, Tree
 
-type Evaluator = Callable[[Tree, NodeId, int], Distribution]
+type Evaluator = Callable[[Tree, NodeId, int], RankedDistribution]
 
 
 @dataclass(order=True, frozen=True, slots=True)
