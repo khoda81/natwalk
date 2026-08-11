@@ -40,9 +40,7 @@ class _PackedUInt32(Sequence[int]):
         if isinstance(index, slice):
             start, stop, step = index.indices(len(self))
             if step == 1:
-                return type(self)(
-                    self._data[start * self._ITEM_SIZE : stop * self._ITEM_SIZE]
-                )
+                return type(self)(self._data[start * self._ITEM_SIZE : stop * self._ITEM_SIZE])
             return tuple(self[position] for position in range(start, stop, step))
         if index < 0:
             index += len(self)
@@ -105,9 +103,7 @@ class _PackedFloat64(Sequence[float]):
         if isinstance(index, slice):
             start, stop, step = index.indices(len(self))
             if step == 1:
-                return type(self)(
-                    self._data[start * self._ITEM_SIZE : stop * self._ITEM_SIZE]
-                )
+                return type(self)(self._data[start * self._ITEM_SIZE : stop * self._ITEM_SIZE])
             return tuple(self[position] for position in range(start, stop, step))
         if index < 0:
             index += len(self)
