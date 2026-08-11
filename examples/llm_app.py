@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = [
 #   "llama-cpp-python>=0.3.16",
 #   "numpy>=1.26",
