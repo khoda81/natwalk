@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-NodeId = int
+type NodeId = int
 
 
 @dataclass(frozen=True, slots=True)
