@@ -12,9 +12,15 @@ _INITIAL_REVEAL = 128
 
 
 class ReplicaDistribution:
-    """Exact ranked prefix plus exact aggregate mass of the unrevealed tail."""
+    """Exact ranked prefix, sparse exact pins, and aggregate unrevealed tail."""
 
-    __slots__ = ("_size", "_tokens", "_probabilities", "_tail_probability")
+    __slots__ = (
+        "_size",
+        "_tokens",
+        "_probabilities",
+        "_pins",
+        "_tail_probability",
+    )
 
     def __init__(
         self,
@@ -37,6 +43,7 @@ class ReplicaDistribution:
         self._size = size
         self._tokens = array("I", tokens)
         self._probabilities = array("d", probabilities)
+        self._pins: dict[int, tuple[int, float]] = {}
         self._tail_probability = float(tail_probability)
 
     def __len__(self) -> int:
@@ -51,6 +58,7 @@ class ReplicaDistribution:
         return (
             self._tokens.itemsize * len(self._tokens)
             + self._probabilities.itemsize * len(self._probabilities)
+            + 12 * len(self._pins)
             + 8
         )
 
@@ -59,14 +67,20 @@ class ReplicaDistribution:
         return self._tail_probability
 
     def token(self, rank: int) -> int:
-        if not 0 <= rank < self.revealed:
-            raise IndexError(f"rank {rank} has not been revealed")
-        return int(self._tokens[rank])
+        if 0 <= rank < self.revealed:
+            return int(self._tokens[rank])
+        pinned = self._pins.get(rank)
+        if pinned is not None:
+            return pinned[0]
+        raise IndexError(f"rank {rank} has not been revealed or pinned")
 
     def probability(self, rank: int) -> float:
-        if not 0 <= rank < self.revealed:
-            raise IndexError(f"rank {rank} has not been revealed")
-        return float(self._probabilities[rank])
+        if 0 <= rank < self.revealed:
+            return float(self._probabilities[rank])
+        pinned = self._pins.get(rank)
+        if pinned is not None:
+            return pinned[1]
+        raise IndexError(f"rank {rank} has not been revealed or pinned")
 
     def mass(self, start: int, end: int) -> float:
         start = min(max(start, 0), len(self))
@@ -75,21 +89,55 @@ class ReplicaDistribution:
             return 0.0
         if end <= self.revealed:
             return math.fsum(self._probabilities[start:end])
-        if end != len(self) or start > self.revealed:
-            raise IndexError("partial unrevealed range mass is not available")
-        return math.fsum(self._probabilities[start : self.revealed]) + self._tail_probability
+        if end == len(self) and start <= self.revealed:
+            return (
+                math.fsum(self._probabilities[start : self.revealed])
+                + self._tail_probability
+            )
+
+        probabilities: list[float] = []
+        for rank in range(start, end):
+            if rank < self.revealed:
+                probabilities.append(float(self._probabilities[rank]))
+                continue
+            pinned = self._pins.get(rank)
+            if pinned is None:
+                raise IndexError("partial unrevealed range mass is not available")
+            probabilities.append(pinned[1])
+        return math.fsum(probabilities)
 
     def rank(self, token: int) -> int:
         try:
             return self._tokens.index(token)
-        except ValueError as error:
+        except ValueError:
+            for rank, (pinned_token, _probability) in self._pins.items():
+                if pinned_token == token:
+                    return rank
             if self.revealed < len(self):
-                raise ValueError(f"token {token} has not been revealed") from error
+                raise ValueError(f"token {token} has not been revealed or pinned") from None
             raise
 
     def nats(self, rank: int) -> float:
         probability = self.probability(rank)
         return -math.log(probability) if probability != 0.0 else math.inf
+
+    def pin(self, rank: int, token: int, probability: float) -> None:
+        """Make one exact out-of-prefix rank available without revealing its neighbors."""
+        if not 0 <= rank < len(self):
+            raise IndexError(rank)
+        token = int(token)
+        probability = float(probability)
+        if rank < self.revealed:
+            if self.token(rank) != token or self.probability(rank) != probability:
+                raise ValueError(f"conflicting pinned contents at rank {rank}")
+            return
+
+        existing = self._pins.get(rank)
+        if existing is not None:
+            if existing != (token, probability):
+                raise ValueError(f"conflicting pinned contents at rank {rank}")
+            return
+        self._pins[rank] = (token, probability)
 
     def reveal(
         self,
@@ -98,7 +146,7 @@ class ReplicaDistribution:
         probabilities: tuple[float, ...],
         tail_probability: float,
     ) -> None:
-        """Extend the concrete prefix, verifying overlap and mass conservation."""
+        """Extend the concrete prefix, verifying overlap, pins, and mass conservation."""
         if len(tokens) != len(probabilities):
             raise ValueError("revealed token/probability lengths differ")
         end = start + len(tokens)
@@ -120,6 +168,13 @@ class ReplicaDistribution:
         if end <= self.revealed:
             return
 
+        for rank, (pinned_token, pinned_probability) in tuple(self._pins.items()):
+            if not self.revealed <= rank < end:
+                continue
+            offset = rank - start
+            if tokens[offset] != pinned_token or probabilities[offset] != pinned_probability:
+                raise ValueError(f"revealed prefix conflicts with pinned rank {rank}")
+
         new_probabilities = probabilities[overlap:]
         expected_tail = math.fsum(new_probabilities) + tail_probability
         if not math.isclose(
@@ -130,9 +185,13 @@ class ReplicaDistribution:
         ):
             raise ValueError("distribution reveal does not conserve tail probability mass")
 
+        previous_revealed = self.revealed
         self._tokens.extend(tokens[overlap:])
         self._probabilities.extend(new_probabilities)
         self._tail_probability = float(tail_probability)
+        for rank in tuple(self._pins):
+            if previous_revealed <= rank < self.revealed:
+                del self._pins[rank]
         if self.revealed == len(self) and self._tail_probability != 0.0:
             raise ValueError("fully revealed distribution must have zero tail mass")
 
@@ -161,7 +220,17 @@ class RevealUpdate:
     tail_probability: float
 
 
-type TreeUpdate = NodeUpdate | RevealUpdate
+@dataclass(frozen=True, slots=True)
+class RankUpdate:
+    """Pin one exact rank needed by a discovered edge outside the visible prefix."""
+
+    node: NodeId
+    rank: int
+    token: int
+    probability: float
+
+
+type TreeUpdate = NodeUpdate | RevealUpdate | RankUpdate
 
 
 def _snapshot(
@@ -180,20 +249,34 @@ def _snapshot(
     return tokens, probabilities, tail_probability
 
 
+def pin(tree: Tree, node: NodeId, rank: int) -> RankUpdate:
+    """Return one exact sparse rank dependency for a replica tree edge."""
+    distribution = tree[node].distribution
+    return RankUpdate(
+        node=node,
+        rank=rank,
+        token=distribution.token(rank),
+        probability=distribution.probability(rank),
+    )
+
+
 def updates(
     tree: Tree,
     *,
     start: NodeId = 0,
     initial_reveal: int = _INITIAL_REVEAL,
-) -> tuple[NodeUpdate, ...]:
-    """Return the append-log suffix without copying full vocabularies."""
+) -> tuple[TreeUpdate, ...]:
+    """Return an append-log suffix plus sparse rank dependencies for its edges."""
     if not 0 <= start <= len(tree.nodes):
         raise IndexError(start)
     if initial_reveal <= 0:
         raise ValueError("initial_reveal must be positive")
 
-    result: list[NodeUpdate] = []
+    result: list[TreeUpdate] = []
     for node_id, node in enumerate(tree.nodes[start:], start=start):
+        if node.parent is not None and node.rank >= initial_reveal:
+            result.append(pin(tree, node.parent, node.rank))
+
         distribution = node.distribution
         stop = min(len(distribution), initial_reveal, distribution.revealed)
         tokens, probabilities, tail_probability = _snapshot(distribution, 0, stop)
@@ -244,6 +327,9 @@ class TreeReplica:
         if isinstance(update, RevealUpdate):
             self._apply_reveal(update)
             return
+        if isinstance(update, RankUpdate):
+            self._apply_rank(update)
+            return
         if update.node == 0:
             self._apply_root(update)
             return
@@ -261,6 +347,15 @@ class TreeReplica:
             )
         if update.parent is None:
             raise ValueError("non-root tree update has no parent")
+
+        parent_distribution = tree[update.parent].distribution
+        try:
+            parent_distribution.token(update.rank)
+            parent_distribution.probability(update.rank)
+        except IndexError as error:
+            raise ValueError(
+                f"tree update edge ({update.parent}, {update.rank}) is not revealed or pinned"
+            ) from error
 
         child = tree.put_child(update.parent, update.rank, self._distribution(update))
         if child != update.node:
@@ -327,4 +422,16 @@ class TreeReplica:
             update.probabilities,
             update.tail_probability,
         )
+        tree.account_distribution_growth(update.node, before)
+
+    def _apply_rank(self, update: RankUpdate) -> None:
+        tree = self.tree
+        if tree is None or not 0 <= update.node < len(tree.nodes):
+            raise ValueError(f"cannot pin rank on unknown tree node {update.node}")
+        distribution = tree[update.node].distribution
+        if not isinstance(distribution, ReplicaDistribution):
+            raise TypeError("tree replica contains an authoritative distribution")
+
+        before = distribution.storage_bytes
+        distribution.pin(update.rank, update.token, update.probability)
         tree.account_distribution_growth(update.node, before)
