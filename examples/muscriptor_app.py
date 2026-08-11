@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = [
 #   "muscriptor>=0.3.0",
 # ]
@@ -60,6 +60,7 @@ def snapshot_control_state(
     return out
 
 
+@torch.inference_mode()
 def restore_control_state(
     model_state: dict[str, dict[str, Any]],
     snapshot: dict[str, dict[str, Any]],
