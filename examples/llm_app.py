@@ -24,6 +24,7 @@ from typing import cast
 
 import numpy as np
 from llama_cpp import Llama
+
 from natwalk.tui import run_tui
 
 
