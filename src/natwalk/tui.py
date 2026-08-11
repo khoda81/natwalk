@@ -161,6 +161,43 @@ def _ancestor_branch_nats(
     return tuple(result)
 
 
+def _tree_viewport(
+    tree: Tree,
+    view: View,
+    *,
+    selected: int,
+    tree_lines: int,
+    edge_limit: int,
+) -> tuple[int, int, tuple[CompactRow, ...]]:
+    """Choose compact rows while guaranteeing the selected root sibling is visible."""
+    distribution = tree[view.node].distribution
+    roots_above = min(max(2, tree_lines // 8), selected - view.first_rank)
+    start = max(view.first_rank, selected - roots_above)
+
+    def visible_from(first_rank: int) -> tuple[int, tuple[CompactRow, ...]]:
+        rendered = compact_rows(
+            tree,
+            view,
+            edge_limit=edge_limit,
+            first_rank=first_rank,
+        )
+        above = first_rank - view.first_rank
+        reserve_above = int(above > 0)
+        reserve_below = int(first_rank < len(distribution) - 1)
+        row_budget = max(0, tree_lines - reserve_above - reserve_below)
+        return above, rendered[:row_budget]
+
+    above, visible = visible_from(start)
+    selected_visible = any(
+        row.parent == view.node and row.rank == selected and not row.forest for row in visible
+    )
+    if not selected_visible and start != selected:
+        start = selected
+        above, visible = visible_from(start)
+
+    return start, above, visible
+
+
 def _wrap_spans(
     spans: tuple[tuple[str, str], ...],
     width: int,
@@ -600,31 +637,14 @@ def _render(
         frame.append(_line("  ∅ terminal", columns))
     else:
         selected = min(view.selected_rank, len(distribution) - 1)
-        roots_above = min(max(2, tree_lines // 8), selected - view.first_rank)
-        start = max(view.first_rank, selected - roots_above)
         edge_limit = max(64, tree_lines * 6)
-        rendered = compact_rows(
+        start, above, visible = _tree_viewport(
             tree,
             view,
+            selected=selected,
+            tree_lines=tree_lines,
             edge_limit=edge_limit,
-            first_rank=start,
         )
-        if not any(
-            row.parent == view.node and row.rank == selected and not row.forest for row in rendered
-        ):
-            start = selected
-            rendered = compact_rows(
-                tree,
-                view,
-                edge_limit=edge_limit,
-                first_rank=start,
-            )
-
-        above = start - view.first_rank
-        reserve_above = int(above > 0)
-        reserve_below = int(start < len(distribution) - 1)
-        row_budget = max(0, tree_lines - reserve_above - reserve_below)
-        visible = rendered[:row_budget]
 
         root_ranks = [
             row.rank
