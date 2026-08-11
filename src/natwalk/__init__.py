@@ -7,7 +7,7 @@ from .query import Suggestion, completions, greedy
 from .search import Search
 from .session import Session
 from .sync import NodeUpdate, TreeReplica, updates
-from .tree import Distribution, RankedDistribution, Tree
+from .tree import Distribution, Tree
 from .view import Row, View, rows
 
 __all__ = [
@@ -16,7 +16,6 @@ __all__ = [
     "Navigation",
     "NavigationState",
     "NodeUpdate",
-    "RankedDistribution",
     "Row",
     "Search",
     "Session",
