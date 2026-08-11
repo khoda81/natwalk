@@ -25,6 +25,7 @@ type DecodeTokens = Callable[[tuple[int, ...]], str]
 _KEY_POLL_SECONDS = 0.05
 _REDRAW_SECONDS = 0.25
 _REVEAL_PAGE = 128
+_REVEAL_PREFETCH = 32
 _SUGGESTION_STYLE = "1;38;5;45"
 _SELECTED_STYLE = "1;38;5;220"
 _FOREST_STYLE = "2;38;5;244"
@@ -1161,12 +1162,17 @@ class App:
             if len(distribution):
                 self.engine.reveal(self.view.node, _REVEAL_PAGE)
             return False
-        if self.view.selected_rank >= distribution.revealed - 1 and distribution.revealed < len(
-            distribution
+        if self.view.selected_rank >= distribution.revealed - 1:
+            if distribution.revealed < len(distribution):
+                self.engine.reveal(self.view.node, distribution.revealed + _REVEAL_PAGE)
+            return False
+
+        self.view = move(self.tree, self.view, 1)
+        if (
+            distribution.revealed < len(distribution)
+            and self.view.selected_rank >= distribution.revealed - _REVEAL_PREFETCH
         ):
             self.engine.reveal(self.view.node, distribution.revealed + _REVEAL_PAGE)
-            return False
-        self.view = move(self.tree, self.view, 1)
         return True
 
     def _rewind(self) -> bool:
