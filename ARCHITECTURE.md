@@ -59,7 +59,7 @@ distribution: RankedDistribution
 children: rank -> NodeId
 ```
 
-A node is published only after its complete authoritative distribution is known. There is no incomplete authoritative-node state. A client replica may know only a concrete ranked prefix of that distribution plus the exact aggregate mass of the unrevealed suffix; that is incomplete *representation*, not incomplete probability state in the engine.
+A node is published only after its complete authoritative distribution is known. There is no incomplete authoritative-node state. A client replica may know only a concrete ranked prefix, sparse exact ranks required by discovered edges, and the exact aggregate mass of the unrevealed suffix; that is incomplete *representation*, not incomplete probability state in the engine.
 
 All vocabulary children exist virtually as `(parent, rank)`. `tree.child(parent, rank)` is a read-only lookup; `tree.put_child(parent, rank, distribution)` is the publication boundary. Repeating an identical publication is an idempotent no-op. Publishing conflicting contents for an existing edge is an invariant violation.
 
@@ -193,26 +193,33 @@ A new `NodeUpdate` contains the node/edge metadata, full distribution cardinalit
 Conceptually a replica distribution contains:
 
 ```text
-ranks [0, k)      exact token + probability entries
+ranks [0, k)      exact contiguous token + probability entries
+selected r >= k   sparse exact token + probability pins when a discovered edge needs them
 ranks [k, n)      one exact aggregate probability mass
 ```
 
-The probability partition can peel concrete ranks from the front while treating `[k, n)` as one exact forest event. If explicit sibling browsing reaches rank `k`, the TUI requests another page. `RevealUpdate` extends the prefix and replaces the old tail mass with the exact remaining tail mass. Rendering itself remains read-only and never triggers a reveal.
+Sparse pins do not subtract their probabilities from the `[k, n)` aggregate. The aggregate still denotes the entire semantic tail event used by the probability partition; a pin merely makes one rank addressable so a discovered node's incoming token and edge surprisal remain derivable from its parent distribution. If search discovers rank 10,000 while only ranks `[0, 128)` are displayed, the replica can therefore retain that one exact rank without materializing ranks 128 through 9,999.
 
-`NodeId` doubles as append-log position. A replica therefore needs only its next unseen node id to resume node synchronization.
+The probability partition peels concrete ranks only from the contiguous prefix and treats `[k, n)` as one exact forest event. Explicit sibling browsing requests another contiguous page *before* the cursor reaches rank `k`, leaving a small read-ahead window in which navigation can continue while the page is in flight. Reaching the prefix boundary before the response arrives is only a correctness fallback: navigation waits there rather than inventing unrevealed rows. `RevealUpdate` extends the prefix, verifies any sparse pins it absorbs, and replaces the old tail mass with the exact remaining tail mass. Rendering itself remains read-only and never triggers a reveal.
+
+When a newly discovered child uses a parent rank outside the contiguous prefix, synchronization sends a `RankUpdate` before the corresponding `NodeUpdate`. Applying a node whose incoming rank is neither revealed nor pinned is an invariant violation. Thus every published replica edge is immediately derivable without duplicating its token on the child node.
+
+`NodeId` doubles as append-log position. Auxiliary reveal/pin records are not node revisions: the worker's node synchronization cursor advances by authoritative tree node count, never by transport-record count.
 
 Applying updates is strict:
 
 ```text
 old duplicate      verify exact contents, then no-op
 next expected id   append
-future id          fail: missing update gap
+future id          fail: missing node update gap
 conflict           fail
 reveal overlap     verify exact contents
 reveal gap         fail
+rank pin replay    verify exact contents
+edge dependency    must already be revealed or pinned
 ```
 
-This gives reconnect/replay idempotence without a second revision counter. Progressive reveal verifies probability-mass conservation rather than silently repairing mismatches.
+This gives reconnect/replay idempotence without a second node revision counter. Progressive reveal verifies probability-mass conservation rather than silently repairing mismatches.
 
 ## Optimistic causal navigation
 
@@ -238,7 +245,7 @@ View(
 )
 ```
 
-It identifies the causal/view root plus sibling-tail selection. It does not schedule search. DOWN at the concrete reveal boundary may explicitly request another ranked page, but ordinary rendering and viewport construction remain pure functions of already-replicated state.
+It identifies the causal/view root plus sibling-tail selection. It does not schedule search. DOWN entering the final read-ahead window of a concrete prefix may explicitly request the next ranked page, but ordinary rendering and viewport construction remain pure functions of already-replicated state.
 
 ## Probability partition
 
@@ -246,7 +253,9 @@ The renderer first decides **which disjoint events deserve rows**, then separate
 
 With a row budget `N`, `partition_rows()` starts from one event representing the visible sibling tail. Each refinement replaces one event with two disjoint events, increasing the row count by exactly one. Candidate refinements currently compete by the probability of their smaller result, preventing extremely unlikely deviations from consuming rows while more probable unresolved alternatives remain elsewhere.
 
-The partition conserves visible probability mass. An unrevealed ranked suffix is simply another exact aggregate forest event; it need not be materialized to preserve the partition. No renderer-created side branch receives a free row.
+The partition conserves visible probability mass. An unrevealed ranked suffix is simply another exact aggregate forest event; it need not be materialized to preserve the partition. Sparse edge pins outside the contiguous reveal prefix do not split that forest. No renderer-created side branch receives a free row.
+
+Forest refinement computes suffix masses by accumulating probabilities backward from the known aggregate tail rather than repeatedly subtracting sibling mass in log space. This avoids numerical drift that could otherwise make a rounded remainder appear less probable than one of its own parts while retaining bounded work over the revealed prefix.
 
 ## Leaf-only radix layout
 
