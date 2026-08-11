@@ -68,13 +68,22 @@ class SearchWorker:
             )
             self._thread.start()
 
-    def close(self) -> None:
+    def request_stop(self) -> None:
+        """Prevent another search step without waiting for the current one."""
         with self._condition:
             self._stop = True
             self._condition.notify_all()
-            thread = self._thread
+
+    def join(self) -> None:
+        """Wait until the worker has finished its current search step and stopped."""
+        thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join()
+
+    def close(self) -> None:
+        """Request stop and wait for deterministic worker shutdown."""
+        self.request_stop()
+        self.join()
 
     def _run(self) -> None:
         try:
