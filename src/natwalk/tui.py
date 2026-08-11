@@ -557,6 +557,8 @@ def _render(
     lines: int | None,
     debug: bool,
     rewind_depth: int,
+    engine_root: NodeId | None = None,
+    pending_commands: int = 0,
 ) -> tuple[tuple[Suggestion, ...], int]:
     """Render one frame from replicated tree state without contacting the engine."""
     columns, terminal_rows = _dimensions()
@@ -593,10 +595,12 @@ def _render(
         )
     )
     if debug:
+        confirmed_root = root if engine_root is None else engine_root
         frame.append(
             _line(
-                f"root {root}  ·  view {view.node}:{view.first_rank}/{view.selected_rank}"
-                f"  ·  rewind {rewind_depth}",
+                f"cursor {root}  ·  engine {confirmed_root}"
+                f"  ·  rank {view.first_rank}/{view.selected_rank}"
+                f"  ·  queued {pending_commands}  ·  rewind {rewind_depth}",
                 columns,
             )
         )
@@ -784,7 +788,7 @@ class App:
         self.view = View(node=self.root)
         self.completion_index = 0
         self.suggestions: tuple[Suggestion, ...] = ()
-        self.pending: CommandId | None = None
+        self.pending: list[tuple[CommandId, NodeId | None]] = []
         self.debug = False
         self.quit_requested = False
         self.last_render = 0.0
@@ -800,36 +804,46 @@ class App:
             raise RuntimeError("engine has no root")
         return root
 
-    def _sync_root(self) -> bool:
-        if self.view.node == self.root:
-            return False
-        self.view = View(node=self.root)
-        self.completion_index = 0
-        return True
+    @property
+    def navigation_blocked(self) -> bool:
+        """Whether the last queued move ends at a child not yet present in the replica."""
+        return bool(self.pending and self.pending[-1][1] is None)
 
     def poll(self) -> bool:
-        """Apply engine events and keep the local tree view rooted at the model cursor."""
+        """Apply engine progress without snapping past the last queued navigation target."""
         changed = self.engine.poll() > 0
-        changed = self._sync_root() or changed
+        completed = 0
 
-        pending = self.pending
-        if pending is None:
-            return changed
+        for command_id, target in self.pending:
+            done = self.engine.take_done(command_id)
+            if done is None:
+                break
+            if target is not None and done.node != target:
+                raise RuntimeError(
+                    f"queued navigation diverged: expected node {target}, got {done.node}"
+                )
+            if target is None:
+                if completed + 1 != len(self.pending):
+                    raise RuntimeError("unknown navigation target must be last in queue")
+                self.view = View(node=done.node)
+                self.completion_index = 0
+                changed = True
+            completed += 1
 
-        done = self.engine.take_done(pending)
-        changed = self._sync_root() or changed
-        if done is None:
-            return changed
+        if completed:
+            del self.pending[:completed]
 
-        self.pending = None
-        self.view = View(node=self.root)
-        self.completion_index = 0
-        return True
+        if not self.pending and self.view.node != self.root:
+            self.view = View(node=self.root)
+            self.completion_index = 0
+            changed = True
+        return changed
 
     def render(self) -> None:
+        cursor = self.view.node
         self.suggestions, self.completion_index = _render(
             self.tree,
-            self.root,
+            cursor,
             self.engine.frontier,
             self.describe,
             self.view,
@@ -841,7 +855,9 @@ class App:
             max_tokens=self.max_tokens,
             lines=self.lines,
             debug=self.debug,
-            rewind_depth=self.engine.rewind_depth,
+            rewind_depth=len(self.tree.path(cursor)),
+            engine_root=self.root,
+            pending_commands=len(self.pending),
         )
         self.last_render = time.monotonic()
 
@@ -891,18 +907,25 @@ class App:
         return False
 
     def _rewind(self) -> bool:
-        if self.pending is not None or self.engine.rewind_depth == 0:
+        if self.navigation_blocked:
             return False
-        self.pending = self.engine.rewind()
-        return False
+        parent = self.tree[self.view.node].parent
+        if parent is None:
+            return False
+
+        command_id = self.engine.rewind()
+        self.pending.append((command_id, parent))
+        self.view = View(node=parent)
+        self.completion_index = 0
+        return True
 
     def _accept(self) -> bool:
-        if self.pending is not None:
+        if self.pending:
             return False
         suggestion = self._selected_suggestion()
         if not suggestion.tokens:
             return False
-        self.pending = self.engine.advance(suggestion.tokens)
+        self.pending.append((self.engine.advance(suggestion.tokens), None))
         return False
 
     def _selected_suggestion(self) -> Suggestion:
@@ -910,21 +933,29 @@ class App:
             return self.suggestions[self.completion_index % len(self.suggestions)]
         return greedy(
             self.tree,
-            self.root,
+            self.view.node,
             max_nats=self.budget_nats,
             max_tokens=self.max_tokens,
         )
 
     def _advance_selected(self) -> bool:
-        if self.pending is not None:
+        if self.navigation_blocked:
             return False
-        distribution = self.tree[self.root].distribution
+        distribution = self.tree[self.view.node].distribution
         if not distribution.tokens:
             return False
 
         selected = min(self.view.selected_rank, len(distribution) - 1)
-        self.pending = self.engine.advance((distribution.tokens[selected],))
-        return False
+        token = distribution.tokens[selected]
+        child = self.tree.child(self.view.node, selected)
+        self.pending.append((self.engine.advance((token,)), child))
+
+        if child is None:
+            return False
+
+        self.view = View(node=child)
+        self.completion_index = 0
+        return True
 
 
 def run_tui(
