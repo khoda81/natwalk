@@ -19,6 +19,7 @@ import argparse
 import copy
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,8 @@ import torch
 import torch.nn.functional as F
 from muscriptor import TranscriptionModel
 from muscriptor.modules.streaming import increment_steps, init_states
+from muscriptor.tokenizer.mt3 import MT3_FULL_PLUS_GROUP_NAMES, MT3Tokenizer
+from muscriptor.tokenizer.notes import DRUM_PROGRAM
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
@@ -108,7 +111,23 @@ class MuscriptorContext:
     def new_cursor(self) -> MuscriptorCursor:
         return MuscriptorCursor(self)
 
-    def describe(self, token: int) -> str:
+
+class MuscriptorDisplay:
+    """Lightweight token display independent of the inference model."""
+
+    def __init__(self) -> None:
+        self.tokenizer = MT3Tokenizer(
+            instrument_vocabulary="MT3_FULL_PLUS",
+            max_shift_steps=1001,
+        )
+        group_map = self.tokenizer.group_program_map
+        self.program_to_name = {
+            group_map[group][0]: name
+            for name, group in MT3_FULL_PLUS_GROUP_NAMES.items()
+            if group in group_map and group_map[group]
+        }
+
+    def __call__(self, token: int) -> str:
         event = self.tokenizer._vocab[token]
         kind, value = event.type, event.value
         if kind in {"PAD", "EOS", "UNK"}:
@@ -122,7 +141,9 @@ class MuscriptorContext:
         if kind == "tie":
             return "tie"
         if kind == "program":
-            return self.tm._instrument_for_program(value)
+            if value == DRUM_PROGRAM:
+                return "drums"
+            return self.program_to_name.get(value, f"program_{value}")
         if kind == "drum":
             return f"drum({midi_name(value)})"
         return f"{kind}({value})"
@@ -205,6 +226,25 @@ class MuscriptorCursor:
         self._probs = None
 
 
+@dataclass(frozen=True, slots=True)
+class MuscriptorCursorFactory:
+    model: str
+    device: str
+    audio: Path
+    chunk: int
+    max_tokens: int
+
+    def __call__(self) -> MuscriptorCursor:
+        tm = TranscriptionModel.load_model(self.model, device=self.device)
+        ctx = MuscriptorContext(
+            tm,
+            self.audio,
+            chunk_index=self.chunk,
+            max_tokens=self.max_tokens,
+        )
+        return ctx.new_cursor()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("audio", type=Path)
@@ -225,17 +265,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     print(f"Loading MuScriptor {args.model} on {args.device} …")
-    tm = TranscriptionModel.load_model(args.model, device=args.device)
-    ctx = MuscriptorContext(tm, args.audio, chunk_index=args.chunk, max_tokens=args.max_tokens)
     run_tui(
-        ctx.new_cursor(),
-        ctx.describe,
+        MuscriptorCursorFactory(
+            model=args.model,
+            device=args.device,
+            audio=args.audio,
+            chunk=args.chunk,
+            max_tokens=args.max_tokens,
+        ),
+        MuscriptorDisplay(),
         title=f"natwalk · MuScriptor · {args.model} · chunk {args.chunk}",
         max_tokens=args.max_tokens,
         budget_nats=args.budget_nats,
         budget_step=args.budget_step,
         lines=args.tree_lines,
-        exit_on_quit=True,
     )
 
 
