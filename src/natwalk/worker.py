@@ -13,8 +13,8 @@ class SearchWorker:
 
     Search semantics remain entirely in :class:`Search`. This wrapper only
     serializes mutation and transports worker failures back to the foreground.
-    Foreground access has priority between search steps so a fast producer
-    cannot starve interactive reads and mutations.
+    Foreground mutation has priority between search steps so a fast producer
+    cannot starve interactive commands.
     """
 
     def __init__(self, search: Search) -> None:
@@ -36,9 +36,13 @@ class SearchWorker:
         if self._error is not None:
             raise self._error
 
+    def raise_if_failed(self) -> None:
+        """Surface a worker failure without waiting for the search lock."""
+        self._raise_error()
+
     @contextmanager
     def access(self):
-        """Serialize one foreground read/mutation with background search."""
+        """Serialize one foreground mutation with background search."""
         self._foreground_waiting.set()
         try:
             with self._condition:
