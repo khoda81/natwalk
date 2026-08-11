@@ -76,9 +76,8 @@ class SearchWorker:
         try:
             while True:
                 with self._condition:
-                    while (
-                        not self._stop
-                        and (not self.search.frontier or self._foreground_waiting.is_set())
+                    while not self._stop and (
+                        not self.search.frontier or self._foreground_waiting.is_set()
                     ):
                         self._condition.wait()
                     if self._stop:
