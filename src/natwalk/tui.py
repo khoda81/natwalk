@@ -225,15 +225,35 @@ def _row_separator_nats(tree: Tree, view: View, row: CompactRow) -> tuple[float,
     if len(row.tokens) < 2:
         return ()
 
+    if row.ranks:
+        if len(row.ranks) != len(row.tokens):
+            raise ValueError("compact row rank count must match token count")
+        ranks = row.ranks
+    else:
+        node = row.parent
+        fallback: list[int] = []
+        for token in row.tokens:
+            distribution = tree[node].distribution
+            try:
+                rank = distribution.tokens.index(token)
+            except ValueError as error:
+                raise ValueError("compact row token is not an edge of its parent") from error
+            fallback.append(rank)
+            child = tree.child(node, rank)
+            if child is None:
+                break
+            node = child
+        ranks = tuple(fallback)
+        if len(ranks) != len(row.tokens):
+            raise ValueError("compact row crosses an undiscovered child")
+
     node = row.parent
     cumulative_nats = tree.path_nats(node, ancestor=view.node)
     result: list[float] = []
-    for index, token in enumerate(row.tokens):
+    for index, (token, rank) in enumerate(zip(row.tokens, ranks, strict=True)):
         distribution = tree[node].distribution
-        try:
-            rank = distribution.tokens.index(token)
-        except ValueError as error:
-            raise ValueError("compact row token is not an edge of its parent") from error
+        if not 0 <= rank < len(distribution) or distribution.tokens[rank] != token:
+            raise ValueError("compact row rank does not identify its token edge")
         cumulative_nats += distribution.nats(rank)
         if index:
             result.append(cumulative_nats)
@@ -479,8 +499,8 @@ def _structure_prefix(
     branch_nats: float,
     branch_reference: float,
     color: bool,
-) -> str:
-    """Draw radix connectors at exact horizontal token-boundary columns."""
+) -> tuple[str, int]:
+    """Draw radix connectors and return their exact unpainted cell width."""
     if len(ancestor_columns) != len(row.ancestor_last):
         raise ValueError("ancestor column count must match tree depth")
     if len(ancestor_branch_nats) != len(row.ancestor_last):
@@ -509,7 +529,7 @@ def _structure_prefix(
     for offset, char in enumerate(branch):
         cells[branch_column + offset] = char
         styles[branch_column + offset] = glyph_style
-    return _styled_cells(cells, styles, color=color)
+    return _styled_cells(cells, styles, color=color), width
 
 
 def _format_tree_row(
@@ -546,7 +566,7 @@ def _format_tree_row(
 
     marker = "❯ " if selected else "  "
     suffix = f"  {display_nats:7.3f} nat"
-    structure = _structure_prefix(
+    structure, structure_width = _structure_prefix(
         row,
         branch_column=branch_column,
         ancestor_columns=ancestor_columns,
@@ -585,14 +605,13 @@ def _format_tree_row(
             label_spans.append((separator, separator_style))
         label_spans.append(("…", _FOREST_STYLE))
 
-    room = max(
-        0,
-        columns - _cell_width(marker) - _cell_width(structure) - _cell_width(suffix),
-    )
-    if room == 0 and _cell_width(marker) + _cell_width(structure) + _cell_width(suffix) > columns:
+    marker_width = _cell_width(marker)
+    suffix_width = _cell_width(suffix)
+    room = max(0, columns - marker_width - structure_width - suffix_width)
+    if room == 0 and marker_width + structure_width + suffix_width > columns:
         fallback_ancestor_columns = tuple(3 * index for index in range(len(row.ancestor_last)))
         fallback_branch_column = 3 * len(row.ancestor_last)
-        structure = _structure_prefix(
+        structure, structure_width = _structure_prefix(
             row,
             branch_column=fallback_branch_column,
             ancestor_columns=fallback_ancestor_columns,
@@ -601,10 +620,7 @@ def _format_tree_row(
             branch_reference=branch_reference,
             color=color,
         )
-        room = max(
-            0,
-            columns - _cell_width(marker) - _cell_width(structure) - _cell_width(suffix),
-        )
+        room = max(0, columns - marker_width - structure_width - suffix_width)
 
     label = _fit_spans(tuple(label_spans), room, color=color)
     nat_style = _viridis(_relative_probability(display_nats, nat_reference))

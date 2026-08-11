@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 import unittest
 from collections.abc import Sequence
@@ -18,10 +19,13 @@ from natwalk.tui import (
     _format_tree_row,
     _relative_probability,
     _row_display_nats,
+    _row_separator_nats,
     _tree_viewport,
     _wrap_spans,
 )
 from natwalk.view import CompactRow, View
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class SlowChildCursor:
@@ -121,6 +125,37 @@ class TerminalWidthTests(unittest.TestCase):
                 )
                 self.assertLessEqual(_cell_width(line), columns)
 
+    def test_colored_tree_structure_does_not_move_nat_column(self) -> None:
+        row = CompactRow(
+            parent=0,
+            rank=0,
+            depth=2,
+            ancestor_last=(False, False),
+            is_last=False,
+            tokens=(1, 2),
+            edge_nats=1.25,
+            path_nats=3.5,
+            child=4,
+            open_ended=True,
+        )
+        kwargs = {
+            "selected": False,
+            "columns": 100,
+            "display_nats": 3.5,
+            "nat_reference": 1.0,
+            "branch_nats": 1.25,
+            "branch_reference": 1.0,
+            "ancestor_branch_nats": (1.1, 1.2),
+            "ancestor_columns": (4, 12),
+            "branch_column": 20,
+        }
+
+        plain = _format_tree_row(row, str, color=False, **kwargs)
+        colored = _format_tree_row(row, str, color=True, **kwargs)
+
+        self.assertEqual(_ANSI.sub("", colored), plain)
+        self.assertTrue(plain.endswith("    3.500 nat"))
+
     def test_forest_summary_never_exceeds_terminal_width(self) -> None:
         for columns in (24, 40, 80, 180):
             line = _format_forest_summary(
@@ -203,6 +238,43 @@ class TerminalWidthTests(unittest.TestCase):
         self.assertAlmostEqual(
             _row_display_nats(tree, tree.root, view, row),
             -math.log(0.5) - math.log(0.8),
+        )
+
+    def test_separator_nats_use_known_radix_ranks_without_token_search(self) -> None:
+        class NoIndexTuple(tuple):
+            def index(self, *_args, **_kwargs):
+                raise AssertionError("renderer searched the vocabulary")
+
+        tree = Tree(
+            Distribution(
+                tokens=NoIndexTuple((10, 11)),
+                probabilities=(0.6, 0.4),
+            )
+        )
+        child = tree.put_child(
+            0,
+            0,
+            Distribution(
+                tokens=NoIndexTuple((20, 21)),
+                probabilities=(0.7, 0.3),
+            ),
+        )
+        row = CompactRow(
+            parent=0,
+            rank=0,
+            depth=0,
+            ancestor_last=(),
+            is_last=False,
+            tokens=(10, 20),
+            edge_nats=-math.log(0.6),
+            path_nats=-math.log(0.6 * 0.7),
+            child=child,
+            ranks=(0, 0),
+        )
+
+        self.assertEqual(
+            _row_separator_nats(tree, View(), row),
+            (-math.log(0.6) - math.log(0.7),),
         )
 
     def test_selected_sibling_stays_inside_tree_viewport(self) -> None:

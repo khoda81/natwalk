@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from unittest.mock import patch
 
 from natwalk.search import Search
 from natwalk.tree import Distribution, Tree
@@ -79,6 +80,21 @@ class ViewTests(unittest.TestCase):
                 self.assertAlmostEqual(mass, 1.0)
                 self.assertLessEqual(len(visible), row_limit)
 
+    def test_partition_refinement_does_not_rescan_large_sibling_forests(self) -> None:
+        size = 20_000
+        tree = Tree(
+            Distribution(
+                tokens=tuple(range(size)),
+                probabilities=(1.0 / size,) * size,
+            )
+        )
+
+        with patch("natwalk.view.forest_nats", wraps=forest_nats) as aggregate:
+            visible = partition_rows(tree, View(), row_limit=64)
+
+        self.assertEqual(len(visible), 64)
+        self.assertEqual(aggregate.call_count, 0)
+
     def test_partition_buys_probable_siblings_before_tiny_deep_deviation(self) -> None:
         tree = Tree(distribution(0.6, 0.25, 0.15))
         first = tree.put_child(0, 0, distribution(0.99, 0.01))
@@ -114,6 +130,7 @@ class ViewTests(unittest.TestCase):
             [(0, 0, 0), (0, 0, 1), (0, 1), (1,)],
         )
         self.assertEqual([row.tokens for row in visible], [(0, 0, 0), (1,), (1,), (1,)])
+        self.assertEqual([row.ranks for row in visible], [(0, 0, 0), (1,), (1,), (1,)])
         self.assertEqual([row.depth for row in visible], [0, 2, 1, 0])
         self.assertEqual(visible[1].parent, second)
         self.assertEqual(len(visible[1].ancestor_last), 2)
