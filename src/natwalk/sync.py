@@ -69,8 +69,10 @@ class ReplicaDistribution:
         return float(self._probabilities[rank])
 
     def mass(self, start: int, end: int) -> float:
-        if not 0 <= start <= end <= len(self):
-            raise IndexError((start, end))
+        start = min(max(start, 0), len(self))
+        end = min(max(end, 0), len(self))
+        if start >= end:
+            return 0.0
         if end <= self.revealed:
             return math.fsum(self._probabilities[start:end])
         if end != len(self) or start > self.revealed:
