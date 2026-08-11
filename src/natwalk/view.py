@@ -83,6 +83,9 @@ class _PartitionEvent:
         return self.forest_parent is not None
 
 
+type _SuffixMassCache = dict[NodeId, tuple[float, ...]]
+
+
 def iter_rows(tree: Tree, view: View):
     """Yield the revealed discovered tree in DFS order without mutating it."""
 
@@ -144,6 +147,29 @@ def forest_nats(
     return parent_nats - math.log(mass) if mass > 0.0 else math.inf
 
 
+def _suffix_mass(
+    tree: Tree,
+    parent: NodeId,
+    start: int,
+    cache: _SuffixMassCache,
+) -> float:
+    """Return ``P(rank >= start)`` from one backward-built revealed suffix table."""
+    distribution = tree[parent].distribution
+    if not 0 <= start <= distribution.revealed:
+        raise IndexError(f"suffix start {start} has not been revealed")
+
+    suffix = cache.get(parent)
+    if suffix is None:
+        revealed = distribution.revealed
+        masses = [0.0] * (revealed + 1)
+        masses[revealed] = distribution.mass(revealed, len(distribution))
+        for rank in range(revealed - 1, -1, -1):
+            masses[rank] = math.fsum((distribution.probability(rank), masses[rank + 1]))
+        suffix = tuple(masses)
+        cache[parent] = suffix
+    return suffix[start]
+
+
 def partition_rows(
     tree: Tree,
     view: View,
@@ -174,6 +200,7 @@ def partition_rows(
         return ()
 
     initial_nats = 0.0 if start == 0 else forest_nats(distribution, start)
+    suffix_masses: _SuffixMassCache = {}
     events = [
         _partition_range(
             tree,
@@ -183,6 +210,7 @@ def partition_rows(
             prefix_ranks=(),
             prefix_tokens=(),
             base_nats=0.0,
+            suffix_masses=suffix_masses,
             range_nats=initial_nats,
         )
     ]
@@ -192,7 +220,7 @@ def partition_rows(
             tuple[float, float, tuple[int, ...], int, tuple[_PartitionEvent, ...]]
         ] = []
         for index, event in enumerate(events):
-            split = _partition_split(tree, event)
+            split = _partition_split(tree, event, suffix_masses)
             if split is None:
                 continue
             smaller_piece_nats = max(part.nats for part in split)
@@ -245,9 +273,11 @@ def _partition_range(
     prefix_ranks: tuple[int, ...],
     prefix_tokens: tuple[int, ...],
     base_nats: float,
+    suffix_masses: _SuffixMassCache,
     range_nats: float | None = None,
 ) -> _PartitionEvent:
-    if not 0 <= start < end <= len(tree[parent].distribution):
+    distribution = tree[parent].distribution
+    if not 0 <= start < end <= len(distribution):
         raise IndexError((start, end))
     if end - start == 1:
         return _partition_branch(
@@ -259,12 +289,16 @@ def _partition_range(
             base_nats=base_nats,
         )
     if range_nats is None:
-        range_nats = forest_nats(
-            tree[parent].distribution,
-            start,
-            end,
-            parent_nats=base_nats,
-        )
+        if end == len(distribution) and start <= distribution.revealed:
+            mass = _suffix_mass(tree, parent, start, suffix_masses)
+            range_nats = base_nats - math.log(mass) if mass > 0.0 else math.inf
+        else:
+            range_nats = forest_nats(
+                distribution,
+                start,
+                end,
+                parent_nats=base_nats,
+            )
     return _PartitionEvent(
         ranks=prefix_ranks,
         tokens=prefix_tokens,
@@ -279,6 +313,7 @@ def _partition_range(
 def _partition_split(
     tree: Tree,
     event: _PartitionEvent,
+    suffix_masses: _SuffixMassCache,
 ) -> tuple[_PartitionEvent, _PartitionEvent] | None:
     if event.forest:
         parent = event.forest_parent
@@ -307,6 +342,7 @@ def _partition_split(
             prefix_ranks=event.ranks,
             prefix_tokens=event.tokens,
             base_nats=event.forest_base_nats,
+            suffix_masses=suffix_masses,
         )
         return first, rest
 
@@ -333,6 +369,7 @@ def _partition_split(
         prefix_ranks=event.ranks,
         prefix_tokens=event.tokens,
         base_nats=event.nats,
+        suffix_masses=suffix_masses,
     )
     return first, rest
 
