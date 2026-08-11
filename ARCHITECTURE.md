@@ -228,6 +228,14 @@ Structural connector brightness uses aggregate probability mass of the displayed
 
 Terminal widths are computed from unpainted Unicode display cells; ANSI styling is applied only after geometry is known.
 
+### Continuation previews
+
+Wide rows may use otherwise-empty horizontal space to show a read-only best-known continuation beyond the measured event. Preview nodes are dimmed to mark them as contextual prediction state; the probability-colored `·` edges are not dimmed and keep their structural meaning.
+
+For a concrete open-ended event, a discovered preview replaces the row's trailing `…`. For a sibling-forest event, the forest `…` remains because it denotes the measured aggregate event itself; a representative continuation may follow it in the dim preview state.
+
+Previews walk only probability structure already present in the replica. They never materialize children, affect the partition, or influence search scheduling. The right-hand nat remains the surprisal of the measured partition event only, never of the contextual preview.
+
 ## Queries
 
 `greedy()` and `completions()` are read-only traversals over already-discovered tree state. They never call the model, materialize unknown children, or mutate search scheduling. If known state ends before a requested completion does, the returned suggestion is marked incomplete.
