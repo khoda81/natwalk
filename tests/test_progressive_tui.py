@@ -44,7 +44,7 @@ def wait_for(app: App, predicate, timeout: float = 3.0) -> None:
 
 
 class ProgressiveTuiTests(unittest.TestCase):
-    def test_down_reveals_next_rank_page_only_at_prefix_boundary(self) -> None:
+    def test_down_prefetches_next_rank_page_before_prefix_boundary(self) -> None:
         app = App(
             wide_cursor,
             str,
@@ -61,13 +61,14 @@ class ProgressiveTuiTests(unittest.TestCase):
             self.assertEqual(len(distribution), 256)
             self.assertEqual(distribution.revealed, 128)
 
-            app.view = View(node=app.root, selected_rank=127)
-            self.assertFalse(app.handle_key("DOWN"))
-            self.assertEqual(app.view.selected_rank, 127)
+            app.view = View(node=app.root, selected_rank=95)
+            self.assertTrue(app.handle_key("DOWN"))
+            self.assertEqual(app.view.selected_rank, 96)
             self.assertEqual(distribution.revealed, 128)
 
             wait_for(app, lambda: distribution.revealed == 256)
 
+            app.view = View(node=app.root, selected_rank=127)
             self.assertTrue(app.handle_key("DOWN"))
             self.assertEqual(app.view.selected_rank, 128)
         finally:
