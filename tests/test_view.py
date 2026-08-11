@@ -17,8 +17,7 @@ def distribution(*probabilities: float) -> Distribution:
 
 class ViewTests(unittest.TestCase):
     def test_rank_tail_is_view_state_not_tree_state(self) -> None:
-        tree = Tree()
-        tree[0].distribution = distribution(0.5, 0.3, 0.15, 0.05)
+        tree = Tree(distribution(0.5, 0.3, 0.15, 0.05))
         before = len(tree.nodes)
 
         visible = rows(tree, View(node=0, first_rank=2, selected_rank=2), limit=20)
@@ -27,11 +26,9 @@ class ViewTests(unittest.TestCase):
         self.assertEqual([row.token for row in visible], [2, 3])
         self.assertEqual(len(tree.nodes), before)
 
-    def test_renderer_walks_materialized_descendants_but_keeps_virtual_siblings(self) -> None:
-        tree = Tree()
-        tree[0].distribution = distribution(0.6, 0.3, 0.1)
-        first = tree.child(0, 0)
-        tree[first].distribution = distribution(0.8, 0.2)
+    def test_renderer_walks_discovered_descendants_but_keeps_virtual_siblings(self) -> None:
+        tree = Tree(distribution(0.6, 0.3, 0.1))
+        first = tree.put_child(0, 0, distribution(0.8, 0.2))
 
         visible = rows(tree, View(), limit=20)
 
@@ -42,26 +39,33 @@ class ViewTests(unittest.TestCase):
         self.assertIsNone(visible[-1].child)
 
     def test_frame_limit_does_not_materialize_offscreen_nodes(self) -> None:
-        tree = Tree()
-        tree[0].distribution = distribution(*([0.01] * 100))
+        tree = Tree(distribution(*([0.01] * 100)))
 
         visible = rows(tree, View(), limit=7)
 
         self.assertEqual(len(visible), 7)
         self.assertEqual(len(tree.nodes), 1)
 
-    def test_enter_and_parent_form_a_rank_preserving_zipper(self) -> None:
-        tree = Tree()
-        tree[0].distribution = distribution(0.5, 0.3, 0.2)
-        view = View(node=0, first_rank=1, selected_rank=2)
+    def test_enter_requires_discovered_child(self) -> None:
+        tree = Tree(distribution(0.5, 0.3, 0.2))
 
-        child_view = enter(tree, view)
-        self.assertEqual(tree[child_view.node].rank, 2)
-        self.assertEqual(parent(tree, child_view), View(node=0, first_rank=2, selected_rank=2))
+        with self.assertRaisesRegex(ValueError, "undiscovered child"):
+            enter(tree, View(node=0, selected_rank=2))
+
+        child = tree.put_child(0, 2, Distribution((), ()))
+        self.assertEqual(enter(tree, View(node=0, selected_rank=2)).node, child)
+
+    def test_parent_preserves_entered_rank_as_forest_boundary(self) -> None:
+        tree = Tree(distribution(0.5, 0.3, 0.2))
+        child = tree.put_child(0, 2, Distribution((), ()))
+
+        self.assertEqual(
+            parent(tree, View(node=child)),
+            View(node=0, first_rank=2, selected_rank=2),
+        )
 
     def test_move_never_crosses_the_tail_boundary(self) -> None:
-        tree = Tree()
-        tree[0].distribution = distribution(0.5, 0.3, 0.2)
+        tree = Tree(distribution(0.5, 0.3, 0.2))
         view = View(node=0, first_rank=1, selected_rank=1)
 
         self.assertEqual(move(tree, view, -1).selected_rank, 1)
@@ -73,16 +77,17 @@ class ViewTests(unittest.TestCase):
             (2,): distribution(0.7, 0.3),
         }
 
-        def evaluate(tree: Tree, node: int) -> Distribution:
-            return table.get(tree.path(node), Distribution((), ()))
+        def evaluate(tree: Tree, parent_id: int, rank: int) -> Distribution:
+            token = tree[parent_id].distribution.tokens[rank]
+            return table.get((*tree.path(parent_id), token), Distribution((), ()))
 
-        tree = Tree()
+        tree = Tree(table[()])
         search = Search(tree, evaluate)
         before = tuple(search.frontier)
+        child = tree.put_child(0, 2, table[(2,)])
 
-        view = enter(tree, View(node=0, first_rank=2, selected_rank=2))
-        rows(tree, view, limit=10)
-        parent(tree, view)
+        rows(tree, View(node=child), limit=10)
+        parent(tree, View(node=child))
 
         self.assertEqual(tuple(search.frontier), before)
 
