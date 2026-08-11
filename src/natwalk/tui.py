@@ -25,6 +25,16 @@ type DecodeTokens = Callable[[tuple[int, ...]], str]
 
 _KEY_POLL_SECONDS = 0.05
 _REDRAW_SECONDS = 0.25
+_SUGGESTION_STYLE = "1;38;5;45"
+_SELECTED_STYLE = "1;38;5;220"
+_FOREST_STYLE = "2;38;5;244"
+_VIRIDIS = (
+    (68, 1, 84),
+    (59, 82, 139),
+    (33, 145, 140),
+    (94, 201, 98),
+    (253, 231, 37),
+)
 _ESCAPE_KEYS = {
     b"\x1b[A": "UP",
     b"\x1b[B": "DOWN",
@@ -92,24 +102,40 @@ def _line(text: str, columns: int) -> str:
 
 
 def _paint(text: str, code: str, *, color: bool) -> str:
-    if not color or not text:
+    if not color or not text or not code:
         return text
     return f"\033[{code}m{text}\033[0m"
 
 
-def _nat_color(nats: float) -> str:
-    """Map surprisal to a readable 256-color accent for structure, not labels."""
-    if nats < 1.0:
-        return "38;5;82"
-    if nats < 2.0:
-        return "38;5;45"
-    if nats < 4.0:
-        return "38;5;39"
-    if nats < 8.0:
-        return "38;5;75"
-    if nats < 12.0:
-        return "38;5;141"
-    return "38;5;244"
+def _relative_probability(nats: float, reference_nats: float) -> float:
+    """Probability ratio to the best event in the current visible window."""
+    if not math.isfinite(nats) or not math.isfinite(reference_nats):
+        return 0.0
+    return min(1.0, math.exp(min(0.0, reference_nats - nats)))
+
+
+def _viridis(probability: float) -> str:
+    """Return a truecolor viridis foreground for a scalar in ``[0, 1]``."""
+    value = min(1.0, max(0.0, probability))
+    position = value * (len(_VIRIDIS) - 1)
+    lower = min(int(position), len(_VIRIDIS) - 2)
+    fraction = position - lower
+    left = _VIRIDIS[lower]
+    right = _VIRIDIS[lower + 1]
+    rgb = tuple(round(a + (b - a) * fraction) for a, b in zip(left, right, strict=True))
+    return f"38;2;{rgb[0]};{rgb[1]};{rgb[2]}"
+
+
+def _grayscale(probability: float) -> str:
+    """Map relative branch probability to grayscale structural brightness."""
+    value = min(1.0, max(0.0, probability))
+    level = round(55 + 195 * math.sqrt(value))
+    return f"38;2;{level};{level};{level}"
+
+
+def _minimum_finite(values) -> float:
+    finite = [value for value in values if math.isfinite(value)]
+    return min(finite) if finite else math.inf
 
 
 def _wrap_spans(
@@ -151,6 +177,52 @@ def _wrap_spans(
         "".join(_paint(text, style, color=color) if style else text for text, style in line)
         for line in lines
     )
+
+
+def _fit_spans(
+    spans: tuple[tuple[str, str], ...],
+    width: int,
+    *,
+    color: bool,
+) -> str:
+    """Clip and pad styled spans to exactly ``width`` terminal cells."""
+    if width <= 0:
+        return ""
+
+    plain_width = sum(_cell_width(text) for text, _style in spans)
+    clipped = plain_width > width
+    target = width - 1 if clipped else width
+    out: list[tuple[str, str]] = []
+    used = 0
+
+    def append(char: str, style: str) -> None:
+        nonlocal used
+        if out and out[-1][1] == style:
+            text, _ = out[-1]
+            out[-1] = (text + char, style)
+        else:
+            out.append((char, style))
+        used += _cell_width(char)
+
+    for text, style in spans:
+        for char in text:
+            char_width = _cell_width(char)
+            if char_width == 0:
+                if out:
+                    append(char, style)
+                continue
+            if used + char_width > target:
+                break
+            append(char, style)
+        else:
+            continue
+        break
+
+    if clipped:
+        append("…", out[-1][1] if out else "")
+
+    rendered = "".join(_paint(text, style, color=color) for text, style in out)
+    return rendered + " " * max(0, width - used)
 
 
 def _sequence_text(
@@ -196,8 +268,52 @@ def _context_spans(
     if context_text and suggestion_text and decode is None:
         spans.append((" · ", ""))
     if suggestion_text:
-        spans.append((suggestion_text, "1"))
+        spans.append((suggestion_text, _SUGGESTION_STYLE))
     return tuple(spans)
+
+
+def _row_display_nats(tree: Tree, root: NodeId, view: View, row: CompactRow) -> float:
+    """Stable endpoint surprisal from the committed root, independent of scrolling."""
+    return tree.path_nats(view.node, ancestor=root) + row.path_nats
+
+
+def _row_branch_nats(tree: Tree, root: NodeId, display_nats: float, row: CompactRow) -> float:
+    """Surprisal of the whole macro-edge represented by one compressed row."""
+    return display_nats - tree.path_nats(row.parent, ancestor=root)
+
+
+def _row_token_styles(
+    tree: Tree,
+    view: View,
+    row: CompactRow,
+    suggestion: tuple[int, ...],
+    *,
+    selected: bool,
+) -> tuple[str, ...]:
+    """Color compact-row tokens only from discrete UI state, never probability."""
+    prefix = list(tree.path_from(view.node, row.parent))
+    matches_suggestion = tuple(prefix) == suggestion[: len(prefix)]
+    styles: list[str] = []
+
+    for token in row.tokens:
+        on_suggestion = (
+            matches_suggestion
+            and len(prefix) < len(suggestion)
+            and suggestion[len(prefix)] == token
+        )
+        if on_suggestion:
+            style = _SUGGESTION_STYLE
+        elif selected:
+            style = _SELECTED_STYLE
+        elif row.forest:
+            style = _FOREST_STYLE
+        else:
+            style = ""
+        styles.append(style)
+        prefix.append(token)
+        matches_suggestion = on_suggestion
+
+    return tuple(styles)
 
 
 def _format_tree_row(
@@ -207,18 +323,39 @@ def _format_tree_row(
     selected: bool,
     columns: int,
     color: bool,
+    display_nats: float | None = None,
+    nat_reference: float | None = None,
+    branch_nats: float | None = None,
+    branch_reference: float | None = None,
+    token_styles: tuple[str, ...] | None = None,
 ) -> str:
+    display_nats = row.path_nats if display_nats is None else display_nats
+    nat_reference = display_nats if nat_reference is None else nat_reference
+    branch_nats = row.edge_nats if branch_nats is None else branch_nats
+    branch_reference = branch_nats if branch_reference is None else branch_reference
+
     marker = "❯ " if selected else "  "
     ancestors = "".join("   " if was_last else "│  " for was_last in row.ancestor_last)
     branch = "└─ " if row.is_last else "├─ "
+    glyph_style = _grayscale(_relative_probability(branch_nats, branch_reference))
 
-    label = " · ".join(describe(token) for token in row.tokens)
-    if row.forest:
-        label = f"{label} · …" if label else "…"
-    elif row.open_ended:
-        label = f"{label} · …"
+    if token_styles is None:
+        fallback = _SELECTED_STYLE if selected else (_FOREST_STYLE if row.forest else "")
+        token_styles = (fallback,) * len(row.tokens)
+    if len(token_styles) != len(row.tokens):
+        raise ValueError("token style count must match compact row token count")
 
-    suffix = f"  {row.path_nats:7.3f} nat"
+    label_spans: list[tuple[str, str]] = []
+    for index, (token, style) in enumerate(zip(row.tokens, token_styles, strict=True)):
+        if index:
+            label_spans.append((" · ", ""))
+        label_spans.append((describe(token), style))
+    if row.forest or row.open_ended:
+        if label_spans:
+            label_spans.append((" · ", ""))
+        label_spans.append(("…", _FOREST_STYLE))
+
+    suffix = f"  {display_nats:7.3f} nat"
     room = max(
         0,
         columns
@@ -227,14 +364,15 @@ def _format_tree_row(
         - _cell_width(branch)
         - _cell_width(suffix),
     )
-    label = _fit(label, room)
+    label = _fit_spans(tuple(label_spans), room, color=color)
+    nat_style = _viridis(_relative_probability(display_nats, nat_reference))
 
     return (
-        marker
-        + _paint(ancestors, "2", color=color)
-        + _paint(branch, _nat_color(row.edge_nats), color=color)
-        + _paint(label, "2" if row.forest else "", color=color)
-        + _paint(suffix, _nat_color(row.path_nats), color=color)
+        _paint(marker, _SELECTED_STYLE if selected else "", color=color)
+        + _paint(ancestors, glyph_style, color=color)
+        + _paint(branch, glyph_style, color=color)
+        + label
+        + _paint(suffix, nat_style, color=color)
     )
 
 
@@ -245,12 +383,16 @@ def _format_forest_summary(
     *,
     columns: int,
     color: bool,
+    nat_reference: float | None = None,
 ) -> str:
+    nat_reference = nats if nat_reference is None else nat_reference
     prefix = f"  {direction} … {count} ranks {'above' if direction == '↑' else 'below'}"
     suffix = f"  {nats:7.3f} nat"
     room = max(0, columns - _cell_width(suffix))
-    return _paint(_fit(prefix, room), "2", color=color) + _paint(
-        suffix, _nat_color(nats), color=color
+    return _paint(_fit(prefix, room), _FOREST_STYLE, color=color) + _paint(
+        suffix,
+        _viridis(_relative_probability(nats, nat_reference)),
+        color=color,
     )
 
 
@@ -444,28 +586,6 @@ def _render(
         row_budget = max(0, tree_lines - reserve_above - reserve_below)
         visible = rendered[:row_budget]
 
-        if above:
-            frame.append(
-                _format_forest_summary(
-                    "↑",
-                    above,
-                    forest_nats(distribution, view.first_rank, start),
-                    columns=columns,
-                    color=color,
-                )
-            )
-
-        for row in visible:
-            frame.append(
-                _format_tree_row(
-                    row,
-                    describe,
-                    selected=(not row.forest and row.parent == view.node and row.rank == selected),
-                    columns=columns,
-                    color=color,
-                )
-            )
-
         root_ranks = [
             row.rank
             for row in visible
@@ -473,14 +593,94 @@ def _render(
         ]
         last_root = max(root_ranks, default=start - 1)
         tail_start = max(start, last_root + 1)
-        if tail_start < len(distribution):
+
+        view_base_nats = tree.path_nats(view.node, ancestor=root)
+        above_nats = (
+            view_base_nats + forest_nats(distribution, view.first_rank, start) if above else None
+        )
+        tail_nats = (
+            view_base_nats + forest_nats(distribution, tail_start)
+            if tail_start < len(distribution)
+            else None
+        )
+        row_display_nats = [_row_display_nats(tree, root, view, row) for row in visible]
+        row_branch_nats = [
+            _row_branch_nats(tree, root, display_nats, row)
+            for row, display_nats in zip(visible, row_display_nats, strict=True)
+        ]
+
+        nat_reference = _minimum_finite(
+            [
+                *row_display_nats,
+                *([above_nats] if above_nats is not None else []),
+                *([tail_nats] if tail_nats is not None else []),
+            ]
+        )
+        branch_reference = _minimum_finite(
+            [
+                *row_branch_nats,
+                *(
+                    [forest_nats(distribution, view.first_rank, start)]
+                    if above
+                    else []
+                ),
+                *(
+                    [forest_nats(distribution, tail_start)]
+                    if tail_start < len(distribution)
+                    else []
+                ),
+            ]
+        )
+
+        if above_nats is not None:
+            frame.append(
+                _format_forest_summary(
+                    "↑",
+                    above,
+                    above_nats,
+                    columns=columns,
+                    color=color,
+                    nat_reference=nat_reference,
+                )
+            )
+
+        for row, display_nats, branch_nats in zip(
+            visible,
+            row_display_nats,
+            row_branch_nats,
+            strict=True,
+        ):
+            row_selected = not row.forest and row.parent == view.node and row.rank == selected
+            frame.append(
+                _format_tree_row(
+                    row,
+                    describe,
+                    selected=row_selected,
+                    columns=columns,
+                    color=color,
+                    display_nats=display_nats,
+                    nat_reference=nat_reference,
+                    branch_nats=branch_nats,
+                    branch_reference=branch_reference,
+                    token_styles=_row_token_styles(
+                        tree,
+                        view,
+                        row,
+                        suggestion.tokens,
+                        selected=row_selected,
+                    ),
+                )
+            )
+
+        if tail_nats is not None:
             frame.append(
                 _format_forest_summary(
                     "↓",
                     len(distribution) - tail_start,
-                    forest_nats(distribution, tail_start),
+                    tail_nats,
                     columns=columns,
                     color=color,
+                    nat_reference=nat_reference,
                 )
             )
 
