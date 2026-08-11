@@ -7,7 +7,7 @@ name = "natwalk"
 version = "0.2.0"
 description = "Navigate autoregressive distributions in fixed-information steps"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 authors = [{ name = "Mahdi Khodabandeh" }]
 keywords = ["information-theory", "arithmetic-coding", "autoregressive", "autocomplete"]
 classifiers = [
