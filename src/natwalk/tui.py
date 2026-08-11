@@ -411,8 +411,7 @@ def _render(
             first_rank=start,
         )
         if not any(
-            row.parent == view.node and row.rank == selected and not row.forest
-            for row in rendered
+            row.parent == view.node and row.rank == selected and not row.forest for row in rendered
         ):
             start = selected
             rendered = compact_rows(
@@ -444,11 +443,7 @@ def _render(
                 _format_tree_row(
                     row,
                     describe,
-                    selected=(
-                        not row.forest
-                        and row.parent == view.node
-                        and row.rank == selected
-                    ),
+                    selected=(not row.forest and row.parent == view.node and row.rank == selected),
                     columns=columns,
                     color=color,
                 )
