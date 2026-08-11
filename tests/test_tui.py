@@ -18,6 +18,7 @@ from natwalk.tui import (
     _format_tree_row,
     _relative_probability,
     _row_display_nats,
+    _tree_viewport,
     _wrap_spans,
 )
 from natwalk.view import CompactRow, View
@@ -167,6 +168,37 @@ class TerminalWidthTests(unittest.TestCase):
         self.assertAlmostEqual(
             _row_display_nats(tree, tree.root, view, row),
             -math.log(0.5) - math.log(0.8),
+        )
+
+    def test_selected_sibling_stays_inside_tree_viewport(self) -> None:
+        tree = Tree(
+            Distribution(
+                tokens=(0, 1, 2),
+                probabilities=(0.99, 0.009, 0.001),
+            )
+        )
+        tree.put_child(
+            tree.root,
+            0,
+            Distribution(
+                tokens=tuple(range(100, 150)),
+                probabilities=(0.02,) * 50,
+            ),
+        )
+        view = View(selected_rank=1)
+
+        start, above, visible = _tree_viewport(
+            tree,
+            view,
+            selected=1,
+            tree_lines=8,
+            edge_limit=64,
+        )
+
+        self.assertEqual(start, 1)
+        self.assertEqual(above, 1)
+        self.assertTrue(
+            any(row.parent == tree.root and row.rank == 1 and not row.forest for row in visible)
         )
 
 
