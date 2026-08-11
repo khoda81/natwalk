@@ -9,7 +9,6 @@ from .session import Session
 from .sync import NodeUpdate, TreeReplica, updates
 from .tree import Distribution, Tree
 from .view import Row, View, rows
-from .worker import SearchWorker
 
 __all__ = [
     "Cursor",
@@ -19,7 +18,6 @@ __all__ = [
     "NodeUpdate",
     "Row",
     "Search",
-    "SearchWorker",
     "Session",
     "Suggestion",
     "Tree",
