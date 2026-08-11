@@ -487,9 +487,7 @@ def _structure_prefix(
         raise ValueError("ancestor branch-nat count must match tree depth")
 
     root_branch = branch_column == 0
-    branch = ("└─ " if row.is_last else "├─ ") if root_branch else (
-        "└─" if row.is_last else "├─"
-    )
+    branch = ("└─ " if row.is_last else "├─ ") if root_branch else ("└─" if row.is_last else "├─")
     width = branch_column + _cell_width(branch)
     cells = [" "] * width
     styles = [""] * width
@@ -582,9 +580,7 @@ def _format_tree_row(
         label_spans.append((describe(token), style))
     if row.forest or row.open_ended:
         if label_spans:
-            separator_style = _grayscale(
-                _relative_probability(row.path_nats, branch_reference)
-            )
+            separator_style = _grayscale(_relative_probability(row.path_nats, branch_reference))
             separator = " ┬ " if len(row.tokens) in branch_offsets else " · "
             label_spans.append((separator, separator_style))
         label_spans.append(("…", _FOREST_STYLE))
