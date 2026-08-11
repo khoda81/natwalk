@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from itertools import islice
 
-from .tree import Distribution, NodeId, Tree
+from .tree import NodeId, RankedDistribution, Tree
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +84,7 @@ class _PartitionEvent:
 
 
 def iter_rows(tree: Tree, view: View):
-    """Yield the view's discovered tree in DFS order without mutating it."""
+    """Yield the revealed discovered tree in DFS order without mutating it."""
 
     def visit(
         parent_id: NodeId,
@@ -95,7 +95,7 @@ def iter_rows(tree: Tree, view: View):
     ):
         distribution = tree[parent_id].distribution
 
-        for rank in range(first_rank, len(distribution)):
+        for rank in range(first_rank, distribution.revealed):
             child_id = tree.child(parent_id, rank)
             is_last = rank == len(distribution) - 1
             edge_nats = distribution.nats(rank)
@@ -106,7 +106,7 @@ def iter_rows(tree: Tree, view: View):
                 depth=depth,
                 ancestor_last=ancestor_last,
                 is_last=is_last,
-                token=distribution.tokens[rank],
+                token=distribution.token(rank),
                 edge_nats=edge_nats,
                 path_nats=path_nats,
                 child=child_id,
@@ -130,17 +130,17 @@ def rows(tree: Tree, view: View, limit: int) -> tuple[Row, ...]:
 
 
 def forest_nats(
-    distribution: Distribution,
+    distribution: RankedDistribution,
     start: int,
     end: int | None = None,
     *,
     parent_nats: float = 0.0,
 ) -> float:
-    """Return surprisal of the aggregate sibling event ``[start, end)``."""
+    """Return surprisal of the exact aggregate sibling event ``[start, end)``."""
     stop = len(distribution) if end is None else end
     if not 0 <= start <= stop <= len(distribution):
         raise IndexError((start, stop))
-    mass = math.fsum(distribution.probabilities[start:stop])
+    mass = distribution.mass(start, stop)
     return parent_nats - math.log(mass) if mass > 0.0 else math.inf
 
 
@@ -171,10 +171,9 @@ def partition_rows(
     into two disjoint events. Candidate refinements compete globally by the
     probability of their smaller result.
 
-    Once the event set is fixed, layout is a separate operation: shared token
-    prefixes are factored like a radix trie, but internal trie nodes never get
-    rows of their own. They only contribute indentation and connector state to
-    the already-selected leaf rows.
+    A progressive replica may know only a ranked prefix concretely. Its
+    unrevealed suffix remains one exact aggregate forest event; rendering never
+    asks the engine to reveal it.
     """
     if row_limit <= 0:
         return ()
@@ -240,9 +239,11 @@ def _partition_branch(
     base_nats: float,
 ) -> _PartitionEvent:
     distribution = tree[parent].distribution
+    if not 0 <= rank < distribution.revealed:
+        raise IndexError(f"rank {rank} has not been revealed")
     return _PartitionEvent(
         ranks=(*prefix_ranks, rank),
-        tokens=(*prefix_tokens, distribution.tokens[rank]),
+        tokens=(*prefix_tokens, distribution.token(rank)),
         nats=base_nats + distribution.nats(rank),
         node=tree.child(parent, rank),
     )
@@ -299,6 +300,10 @@ def _partition_split(
         if event.forest_end - event.forest_start < 2:
             raise AssertionError("single-rank ranges must be concrete events")
 
+        distribution = tree[parent].distribution
+        if event.forest_start >= distribution.revealed:
+            return None
+
         first = _partition_branch(
             tree,
             parent=parent,
@@ -323,7 +328,7 @@ def _partition_split(
     if child is None:
         return None
     distribution = tree[child].distribution
-    if len(distribution) < 2:
+    if len(distribution) < 2 or distribution.revealed == 0:
         return None
 
     first = _partition_branch(
@@ -428,13 +433,17 @@ def _partition_layout_rows(
         parent = _partition_node(tree, root, common_ranks)
 
         ancestor_prefixes = tuple(
-            event.ranks[:depth] for depth in range(common) if event.ranks[:depth] in branch_prefixes
+            event.ranks[:depth]
+            for depth in range(common)
+            if event.ranks[:depth] in branch_prefixes
         )
         ancestor_last = tuple(
-            event.ranks[len(prefix)] == children[prefix][-1] for prefix in ancestor_prefixes
+            event.ranks[len(prefix)] == children[prefix][-1]
+            for prefix in ancestor_prefixes
         )
         ancestor_nats = tuple(
-            edge_nats[(prefix, event.ranks[len(prefix)])] for prefix in ancestor_prefixes
+            edge_nats[(prefix, event.ranks[len(prefix)])]
+            for prefix in ancestor_prefixes
         )
 
         branch_prefix = common_ranks
@@ -461,7 +470,7 @@ def _partition_layout_rows(
             forest_count = 0
             forest_start = 0
             child = event.node
-            open_ended = child is None or bool(tree[child].distribution.tokens)
+            open_ended = child is None or len(tree[child].distribution) != 0
 
         rows_out.append(
             CompactRow(
@@ -503,9 +512,10 @@ def parent(tree: Tree, view: View) -> View:
 
 
 def move(tree: Tree, view: View, delta: int) -> View:
-    """Move selection within the currently visible sibling tail."""
+    """Move selection within the currently revealed sibling prefix."""
     distribution = tree[view.node].distribution
-    if not distribution.tokens:
+    if distribution.revealed == 0:
         return view
-    selected = min(max(view.selected_rank + delta, view.first_rank), len(distribution) - 1)
+    last = distribution.revealed - 1
+    selected = min(max(view.selected_rank + delta, view.first_rank), last)
     return View(node=view.node, first_rank=view.first_rank, selected_rank=selected)
