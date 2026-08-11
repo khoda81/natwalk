@@ -95,8 +95,10 @@ class _NumpyDistribution:
         return float(self.probabilities[rank])
 
     def mass(self, start: int, end: int) -> float:
-        if not 0 <= start <= end <= len(self):
-            raise IndexError((start, end))
+        start = min(max(start, 0), len(self))
+        end = min(max(end, 0), len(self))
+        if start >= end:
+            return 0.0
         return float(np.sum(self.probabilities[start:end], dtype=np.float64))
 
     def rank(self, token: int) -> int:
