@@ -198,7 +198,9 @@ def partition_rows(
     ]
 
     while len(events) < row_limit:
-        candidates: list[tuple[float, float, tuple[int, ...], int, tuple[_PartitionEvent, ...]]] = []
+        candidates: list[
+            tuple[float, float, tuple[int, ...], int, tuple[_PartitionEvent, ...]]
+        ] = []
         for index, event in enumerate(events):
             split = _partition_split(tree, event)
             if split is None:
