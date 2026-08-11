@@ -226,7 +226,7 @@ class EngineClient:
 
 
 def _run_engine(factory: CursorFactory, commands, events) -> None:
-    """Own one Session and service commands between synchronous search steps."""
+    """Own one Session and service commands between synchronous search discoveries."""
     try:
         session = Session(factory())
         history: list[Checkpoint] = []
@@ -291,7 +291,7 @@ def _run_engine(factory: CursorFactory, commands, events) -> None:
                 continue
 
             if session.search.frontier:
-                session.search.step()
+                session.search.discover()
                 publish_tree()
                 continue
 
