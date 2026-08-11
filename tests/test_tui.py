@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import time
 import unittest
+from collections.abc import Sequence
 
 from natwalk.tui import (
+    App,
     _cell_width,
     _clip,
     _context_text,
@@ -12,6 +15,29 @@ from natwalk.tui import (
     _wrap_spans,
 )
 from natwalk.view import CompactRow
+
+
+class SlowChildCursor:
+    def __init__(self) -> None:
+        self.path: tuple[int, ...] = ()
+
+    def predict(self) -> Sequence[float]:
+        if self.path:
+            time.sleep(10)
+        return (0.6, 0.4) if not self.path else ()
+
+    def observe(self, token: int) -> None:
+        self.path = (*self.path, token)
+
+    def checkpoint(self) -> object:
+        return self.path
+
+    def restore(self, checkpoint: object) -> None:
+        self.path = checkpoint
+
+
+def slow_child_cursor() -> SlowChildCursor:
+    return SlowChildCursor()
 
 
 class TerminalWidthTests(unittest.TestCase):
@@ -82,6 +108,33 @@ class TerminalWidthTests(unittest.TestCase):
         )
 
         self.assertEqual(text, "The answer is definitely")
+
+
+class InteractiveAppTests(unittest.TestCase):
+    def test_model_call_never_blocks_local_navigation(self) -> None:
+        app = App(
+            slow_child_cursor,
+            str,
+            title="test",
+            context="",
+            decode_tokens=None,
+            max_tokens=8,
+            budget_nats=1.0,
+            budget_step=0.25,
+            lines=8,
+        )
+        try:
+            started = time.monotonic()
+            self.assertFalse(app.handle_key("RIGHT"))
+            self.assertLess(time.monotonic() - started, 0.1)
+            self.assertIsNotNone(app.pending)
+
+            started = time.monotonic()
+            self.assertTrue(app.handle_key("DOWN"))
+            self.assertLess(time.monotonic() - started, 0.1)
+            self.assertEqual(app.view.selected_rank, 1)
+        finally:
+            app.engine.terminate()
 
 
 if __name__ == "__main__":
