@@ -165,7 +165,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--threads", type=int)
     parser.add_argument("--max-tokens", type=int, default=128)
-    parser.add_argument("--choices", type=int, default=2)
     parser.add_argument(
         "--tree-lines",
         type=int,
@@ -196,7 +195,6 @@ def main() -> None:
             LlamaCursor(llm, prompt_tokens),
             TokenDisplay(llm),
             title=f"natwalk · llama.cpp · {model_path.name}",
-            choices=args.choices,
             max_tokens=args.max_tokens,
             budget_nats=args.budget_nats,
             budget_step=args.budget_step,
