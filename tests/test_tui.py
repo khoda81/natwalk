@@ -227,7 +227,6 @@ class TerminalWidthTests(unittest.TestCase):
             view,
             selected=1,
             tree_lines=8,
-            edge_limit=64,
         )
 
         self.assertEqual(start, 1)
