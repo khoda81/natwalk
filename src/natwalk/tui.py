@@ -263,8 +263,7 @@ def _render(
     max_choice = min(9, navigation.choices - 1)
     choice_hint = "0 choose" if max_choice == 0 else f"0–{max_choice} choose"
     _line(
-        f"↑↓ rank  ·  ← parent  ·  → child  ·  {choice_hint}"
-        "  ·  Space accept  ·  Backspace undo",
+        f"↑↓ rank  ·  ← parent  ·  → child  ·  {choice_hint}  ·  Space accept  ·  Backspace undo",
         columns,
     )
     _line("Tab/Shift-Tab suggestion  ·  [ ] budget  ·  d debug  ·  q quit", columns)
