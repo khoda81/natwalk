@@ -5,7 +5,16 @@ import unittest
 
 from natwalk.search import Search
 from natwalk.tree import Distribution, Tree
-from natwalk.view import View, compact_rows, enter, forest_nats, move, parent, rows
+from natwalk.view import (
+    View,
+    compact_rows,
+    enter,
+    forest_nats,
+    move,
+    parent,
+    partition_rows,
+    rows,
+)
 
 
 def distribution(*probabilities: float) -> Distribution:
@@ -55,6 +64,51 @@ class ViewTests(unittest.TestCase):
             forest_nats(dist, 1, parent_nats=2.0),
             2.0 - math.log(0.4),
         )
+
+    def test_partition_one_row_is_the_whole_visible_event(self) -> None:
+        tree = Tree(distribution(0.6, 0.3, 0.1))
+
+        visible = partition_rows(tree, View(), row_limit=1)
+
+        self.assertEqual(len(visible), 1)
+        self.assertTrue(visible[0].forest)
+        self.assertEqual(visible[0].forest_count, 3)
+        self.assertEqual(visible[0].tokens, ())
+        self.assertAlmostEqual(visible[0].path_nats, 0.0)
+
+    def test_partition_refinement_conserves_probability_mass(self) -> None:
+        tree = Tree(distribution(0.6, 0.3, 0.1))
+        first = tree.put_child(0, 0, distribution(0.8, 0.2))
+        tree.put_child(first, 0, Distribution((), ()))
+
+        for row_limit in range(1, 5):
+            with self.subTest(row_limit=row_limit):
+                visible = partition_rows(tree, View(), row_limit=row_limit)
+                mass = math.fsum(math.exp(-row.path_nats) for row in visible)
+                self.assertAlmostEqual(mass, 1.0)
+                self.assertLessEqual(len(visible), row_limit)
+
+    def test_partition_buys_probable_siblings_before_tiny_deep_deviation(self) -> None:
+        tree = Tree(distribution(0.6, 0.25, 0.15))
+        first = tree.put_child(0, 0, distribution(0.99, 0.01))
+
+        three = partition_rows(tree, View(), row_limit=3)
+        four = partition_rows(tree, View(), row_limit=4)
+
+        self.assertEqual([row.tokens for row in three], [(0,), (1,), (2,)])
+        self.assertEqual(
+            [row.tokens for row in four],
+            [(0, 0), (0, 1), (1,), (2,)],
+        )
+        self.assertAlmostEqual(
+            max(row.path_nats for row in three),
+            -math.log(0.15),
+        )
+        self.assertAlmostEqual(
+            max(row.path_nats for row in four),
+            -math.log(0.6 * 0.01),
+        )
+        self.assertIsNotNone(first)
 
     def test_compact_view_collapses_unary_chain_and_keeps_side_forest(self) -> None:
         tree = Tree(distribution(0.6, 0.4))
