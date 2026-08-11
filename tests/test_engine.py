@@ -4,7 +4,7 @@ import time
 import unittest
 from collections.abc import Sequence
 
-from natwalk.engine import Commit, EngineClient
+from natwalk.engine import Advance, EngineClient
 
 
 class ToyCursor:
@@ -61,36 +61,46 @@ class EngineTests(unittest.TestCase):
         finally:
             client.terminate()
 
-    def test_duplicate_write_command_executes_once(self) -> None:
+    def test_duplicate_navigation_command_executes_once(self) -> None:
         client = EngineClient(toy_cursor)
         client.start()
         try:
             wait_until(client, lambda: client.root == 0)
-            command = Commit(41, (0,))
+            command = Advance(41, (0,))
             client.send(command)
             wait_until(client, lambda: client.done(41) is not None)
-            self.assertEqual(client.root, 1)
-            self.assertEqual(client.history_depth, 1)
+            self.assertEqual(client.tree.path(client.root), (0,))
+            self.assertEqual(client.rewind_depth, 1)
 
             client.send(command)
             wait_until(client, lambda: client.done(41) is not None)
-            self.assertEqual(client.root, 1)
-            self.assertEqual(client.history_depth, 1)
+            self.assertEqual(client.tree.path(client.root), (0,))
+            self.assertEqual(client.rewind_depth, 1)
         finally:
             client.terminate()
 
-    def test_undo_is_owned_by_engine_process(self) -> None:
+    def test_advance_records_one_rewind_point_per_token(self) -> None:
         client = EngineClient(toy_cursor)
         client.start()
         try:
             wait_until(client, lambda: client.root == 0)
-            commit = client.commit((0,))
-            wait_until(client, lambda: client.done(commit) is not None and client.root != 0)
-            self.assertEqual(client.history_depth, 1)
+            advance = client.advance((0, 1))
+            wait_until(client, lambda: client.done(advance) is not None)
 
-            undo = client.undo()
-            wait_until(client, lambda: client.done(undo) is not None and client.root == 0)
-            self.assertEqual(client.history_depth, 0)
+            endpoint = client.root
+            self.assertEqual(client.tree.path(endpoint), (0, 1))
+            self.assertEqual(client.rewind_depth, 2)
+
+            rewind = client.rewind()
+            wait_until(client, lambda: client.done(rewind) is not None)
+            self.assertEqual(client.tree.path(client.root), (0,))
+            self.assertEqual(client.rewind_depth, 1)
+            self.assertIn(endpoint, range(len(client.tree.nodes)))
+
+            rewind = client.rewind()
+            wait_until(client, lambda: client.done(rewind) is not None)
+            self.assertEqual(client.root, client.tree.root)
+            self.assertEqual(client.rewind_depth, 0)
         finally:
             client.terminate()
 
@@ -98,7 +108,7 @@ class EngineTests(unittest.TestCase):
         client = EngineClient(slow_cursor)
         client.start()
         wait_until(client, lambda: client.root == 0)
-        client.inspect(0, 0)
+        client.advance((0,))
         time.sleep(0.05)
 
         started = time.monotonic()
