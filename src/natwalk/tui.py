@@ -619,11 +619,7 @@ def _render(
         branch_reference = _minimum_finite(
             [
                 *row_branch_nats,
-                *(
-                    [forest_nats(distribution, view.first_rank, start)]
-                    if above
-                    else []
-                ),
+                *([forest_nats(distribution, view.first_rank, start)] if above else []),
                 *(
                     [forest_nats(distribution, tail_start)]
                     if tail_start < len(distribution)
