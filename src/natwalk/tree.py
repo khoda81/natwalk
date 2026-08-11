@@ -22,6 +22,11 @@ class RankedDistribution(Protocol):
     Backends own the concrete representation. Natwalk only requires random
     access by probability rank, exact aggregate range mass, reverse token
     lookup for explicit navigation, and a retained-storage estimate.
+
+    ``mass(start, end)`` is the probability of the clipped half-open rank range
+    ``[start, end) ∩ [0, len(self))``. Empty or reversed ranges have zero mass;
+    negative endpoints are coordinates outside the domain, not Python-style
+    indices from the end.
     """
 
     def __len__(self) -> int: ...
@@ -206,8 +211,10 @@ class Distribution:
         return self.probabilities[rank]
 
     def mass(self, start: int, end: int) -> float:
-        if not 0 <= start <= end <= len(self):
-            raise IndexError((start, end))
+        start = min(max(start, 0), len(self))
+        end = min(max(end, 0), len(self))
+        if start >= end:
+            return 0.0
         return math.fsum(self.probabilities[start:end])
 
     def rank(self, token: int) -> int:
@@ -284,6 +291,13 @@ class Tree:
         self._storage_bytes += distribution.storage_bytes
         parent._children[rank] = child_id
         return child_id
+
+    def account_distribution_growth(self, node_id: NodeId, previous_bytes: int) -> None:
+        """Account for progressive storage growth of one already-published node."""
+        distribution = self.nodes[node_id].distribution
+        if distribution.storage_bytes < previous_bytes:
+            raise ValueError("published distribution storage cannot shrink")
+        self._storage_bytes += distribution.storage_bytes - previous_bytes
 
     def token(self, node_id: NodeId) -> int:
         node = self.nodes[node_id]
