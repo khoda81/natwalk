@@ -43,8 +43,42 @@ class SlowChildCursor:
         self.path = checkpoint
 
 
+class NavigationCursor:
+    def __init__(self) -> None:
+        self.path: tuple[int, ...] = ()
+
+    def predict(self) -> Sequence[float]:
+        return {
+            (): (1.0,),
+            (0,): (1.0,),
+        }.get(self.path, ())
+
+    def observe(self, token: int) -> None:
+        self.path = (*self.path, token)
+
+    def checkpoint(self) -> object:
+        return self.path
+
+    def restore(self, checkpoint: object) -> None:
+        self.path = checkpoint
+
+
 def slow_child_cursor() -> SlowChildCursor:
     return SlowChildCursor()
+
+
+def navigation_cursor() -> NavigationCursor:
+    return NavigationCursor()
+
+
+def wait_for_app(app: App, predicate, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.poll()
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("app condition did not become true before timeout")
 
 
 class TerminalWidthTests(unittest.TestCase):
@@ -225,6 +259,37 @@ class InteractiveAppTests(unittest.TestCase):
             self.assertTrue(app.handle_key("DOWN"))
             self.assertLess(time.monotonic() - started, 0.1)
             self.assertEqual(app.view.selected_rank, 1)
+        finally:
+            app.engine.terminate()
+
+    def test_right_and_left_move_model_search_and_view_root_together(self) -> None:
+        app = App(
+            navigation_cursor,
+            str,
+            title="test",
+            context="",
+            decode_tokens=None,
+            max_tokens=8,
+            budget_nats=1.0,
+            budget_step=0.25,
+            lines=8,
+        )
+        try:
+            initial_root = app.root
+            self.assertFalse(app.handle_key("RIGHT"))
+            wait_for_app(app, lambda: app.pending is None and app.root != initial_root)
+
+            child = app.root
+            self.assertEqual(app.view.node, child)
+            self.assertEqual(app.tree.path(child), (0,))
+            self.assertEqual(app.engine.rewind_depth, 1)
+
+            self.assertFalse(app.handle_key("LEFT"))
+            wait_for_app(app, lambda: app.pending is None and app.root == initial_root)
+
+            self.assertEqual(app.view.node, initial_root)
+            self.assertEqual(app.engine.rewind_depth, 0)
+            self.assertIn(child, range(len(app.tree.nodes)))
         finally:
             app.engine.terminate()
 
