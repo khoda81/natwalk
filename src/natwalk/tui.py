@@ -261,9 +261,7 @@ def _render(
             )
         )
     else:
-        frame.append(
-            _line("suggestion  ⟳ search has not reached the greedy tail yet", columns)
-        )
+        frame.append(_line("suggestion  ⟳ search has not reached the greedy tail yet", columns))
 
     distribution = session.inspect(view.node)
     focus = tree.path_from(session.root, view.node)
