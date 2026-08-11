@@ -1,0 +1,107 @@
+name: Implement continuation previews
+
+on:
+  push:
+    branches: [agent/continuation-previews]
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    if: github.event.head_commit.message == 'Implement continuation previews'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/continuation-previews
+      - name: Apply implementation
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              if text.count(old) != 1:
+                  raise RuntimeError(f"expected exactly one match in {path}: {old[:80]!r}")
+              file.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "src/natwalk/view.py",
+              "    forest_count: int = 0\n    ancestor_nats: tuple[float, ...] = ()\n",
+              "    forest_count: int = 0\n    forest_start: int = 0\n    ancestor_nats: tuple[float, ...] = ()\n",
+          )
+          replace_once(
+              "src/natwalk/view.py",
+              '''        if event.forest:\n            forest_count = event.forest_end - event.forest_start\n            open_ended = False\n            child = None\n        else:\n            forest_count = 0\n            child = event.node\n            open_ended = child is None or bool(tree[child].distribution.tokens)\n''',
+              '''        if event.forest:\n            forest_count = event.forest_end - event.forest_start\n            forest_start = event.forest_start\n            open_ended = False\n            child = None\n        else:\n            forest_count = 0\n            forest_start = 0\n            child = event.node\n            open_ended = child is None or bool(tree[child].distribution.tokens)\n''',
+          )
+          replace_once(
+              "src/natwalk/view.py",
+              "                forest_count=forest_count,\n                ancestor_nats=ancestor_nats,\n",
+              "                forest_count=forest_count,\n                forest_start=forest_start,\n                ancestor_nats=ancestor_nats,\n",
+          )
+
+          replace_once(
+              "src/natwalk/tui.py",
+              '_FOREST_STYLE = "2;38;5;244"\n',
+              '_FOREST_STYLE = "2;38;5;244"\n_PREDICTION_STYLE = "2"\n',
+          )
+          separator_anchor = '''def _tree_viewport(\n    tree: Tree,\n'''
+          preview_helper = '''def _row_preview(\n    tree: Tree,\n    view: View,\n    row: CompactRow,\n    *,\n    max_tokens: int = 64,\n) -> tuple[tuple[int, ...], tuple[float, ...], bool]:\n    \"\"\"Return read-only best-known context beyond one measured row event.\n\n    Preview tokens never materialize tree state. The returned edge surprisals are\n    cumulative from the view root and belong only to the preview separators.\n    \"\"\"\n    if max_tokens <= 0:\n        return (), (), False\n\n    tokens: list[int] = []\n    separator_nats: list[float] = []\n\n    if row.forest:\n        node = row.parent\n        for rank in row.ranks:\n            child = tree.child(node, rank)\n            if child is None:\n                raise ValueError(\"forest row prefix crosses an undiscovered edge\")\n            node = child\n\n        distribution = tree[node].distribution\n        if not 0 <= row.forest_start < len(distribution):\n            raise ValueError(\"forest preview start is outside its parent distribution\")\n        rank = row.forest_start\n        cumulative_nats = tree.path_nats(node, ancestor=view.node) + distribution.nats(rank)\n        tokens.append(distribution.tokens[rank])\n        separator_nats.append(cumulative_nats)\n        child = tree.child(node, rank)\n        if child is None:\n            return tuple(tokens), tuple(separator_nats), False\n        node = child\n    else:\n        node = row.child\n        if node is None:\n            return (), (), False\n        cumulative_nats = row.path_nats\n\n    while len(tokens) < max_tokens:\n        distribution = tree[node].distribution\n        if not distribution.tokens:\n            return tuple(tokens), tuple(separator_nats), True\n\n        rank = 0\n        cumulative_nats += distribution.nats(rank)\n        tokens.append(distribution.tokens[rank])\n        separator_nats.append(cumulative_nats)\n        child = tree.child(node, rank)\n        if child is None:\n            return tuple(tokens), tuple(separator_nats), False\n        node = child\n\n    return tuple(tokens), tuple(separator_nats), not tree[node].distribution.tokens\n\n\n'''
+          replace_once("src/natwalk/tui.py", separator_anchor, preview_helper + separator_anchor)
+
+          replace_once(
+              "src/natwalk/tui.py",
+              '''    inline_branches: tuple[int, ...] = (),\n    separator_nats: tuple[float, ...] | None = None,\n) -> str:\n''',
+              '''    inline_branches: tuple[int, ...] = (),\n    separator_nats: tuple[float, ...] | None = None,\n    preview_tokens: tuple[int, ...] = (),\n    preview_separator_nats: tuple[float, ...] = (),\n    preview_complete: bool = True,\n) -> str:\n''',
+          )
+          replace_once(
+              "src/natwalk/tui.py",
+              '''    if len(separator_nats) != expected_separators:\n        raise ValueError(\"separator edge-nat count must match token boundaries\")\n\n    branch_offsets = set(inline_branches)\n''',
+              '''    if len(separator_nats) != expected_separators:\n        raise ValueError(\"separator edge-nat count must match token boundaries\")\n    if len(preview_separator_nats) != len(preview_tokens):\n        raise ValueError(\"preview edge-nat count must match preview tokens\")\n\n    branch_offsets = set(inline_branches)\n''',
+          )
+          replace_once(
+              "src/natwalk/tui.py",
+              '''    if row.forest or row.open_ended:\n        if label_spans:\n            separator_style = _grayscale(_relative_probability(row.path_nats, branch_reference))\n            separator = \" ┬ \" if len(row.tokens) in branch_offsets else \" · \"\n            label_spans.append((separator, separator_style))\n        label_spans.append((\"…\", _FOREST_STYLE))\n\n    marker_width = _cell_width(marker)\n''',
+              '''    if row.forest or (row.open_ended and not preview_tokens):\n        if label_spans:\n            separator_style = _grayscale(_relative_probability(row.path_nats, branch_reference))\n            separator = \" ┬ \" if len(row.tokens) in branch_offsets else \" · \"\n            label_spans.append((separator, separator_style))\n        label_spans.append((\"…\", _FOREST_STYLE))\n\n    for token, preview_nats in zip(preview_tokens, preview_separator_nats, strict=True):\n        if label_spans:\n            separator_style = _grayscale(\n                _relative_probability(preview_nats, branch_reference)\n            )\n            label_spans.append((\" · \", separator_style))\n        label_spans.append((describe(token), _PREDICTION_STYLE))\n\n    if preview_tokens and not preview_complete:\n        separator_style = _grayscale(\n            _relative_probability(preview_separator_nats[-1], branch_reference)\n        )\n        label_spans.append((\" · \", separator_style))\n        label_spans.append((\"…\", _PREDICTION_STYLE))\n\n    marker_width = _cell_width(marker)\n''',
+          )
+          replace_once(
+              "src/natwalk/tui.py",
+              '''            frame.append(\n                _format_tree_row(\n''',
+              '''            preview_tokens, preview_separator_nats, preview_complete = _row_preview(\n                tree,\n                view,\n                row,\n                max_tokens=min(max_tokens, 64),\n            )\n            frame.append(\n                _format_tree_row(\n''',
+          )
+          replace_once(
+              "src/natwalk/tui.py",
+              '''                    separator_nats=_row_separator_nats(tree, view, row),\n                    token_styles=_row_token_styles(\n''',
+              '''                    separator_nats=_row_separator_nats(tree, view, row),\n                    preview_tokens=preview_tokens,\n                    preview_separator_nats=preview_separator_nats,\n                    preview_complete=preview_complete,\n                    token_styles=_row_token_styles(\n''',
+          )
+
+          replace_once(
+              "tests/test_tui.py",
+              '''from natwalk.tui import (\n    _SUGGESTION_STYLE,\n''',
+              '''from natwalk.tui import (\n    _PREDICTION_STYLE,\n    _SUGGESTION_STYLE,\n''',
+          )
+          replace_once(
+              "tests/test_tui.py",
+              '''    _row_display_nats,\n    _row_separator_nats,\n''',
+              '''    _row_display_nats,\n    _row_preview,\n    _row_separator_nats,\n''',
+          )
+          replace_once(
+              "tests/test_tui.py",
+              "from natwalk.view import CompactRow, View\n",
+              "from natwalk.view import CompactRow, View, partition_rows\n",
+          )
+          test_anchor = '''    def test_selected_sibling_stays_inside_tree_viewport(self) -> None:\n'''
+          preview_tests = '''    def test_row_preview_walks_only_known_greedy_children(self) -> None:\n        tree = Tree(Distribution(tokens=(10,), probabilities=(1.0,)))\n        first = tree.put_child(\n            tree.root,\n            0,\n            Distribution(tokens=(20, 21), probabilities=(0.75, 0.25)),\n        )\n        second = tree.put_child(\n            first,\n            0,\n            Distribution(tokens=(30,), probabilities=(1.0,)),\n        )\n        row = CompactRow(\n            parent=tree.root,\n            rank=0,\n            depth=0,\n            ancestor_last=(),\n            is_last=True,\n            tokens=(10,),\n            edge_nats=0.0,\n            path_nats=0.0,\n            child=first,\n            open_ended=True,\n            ranks=(0,),\n        )\n        before = len(tree.nodes)\n\n        tokens, separator_nats, complete = _row_preview(tree, View(), row)\n\n        self.assertEqual(tokens, (20, 30))\n        self.assertEqual(\n            separator_nats,\n            (-math.log(0.75), -math.log(0.75)),\n        )\n        self.assertFalse(complete)\n        self.assertEqual(len(tree.nodes), before)\n        self.assertIsNone(tree.child(second, 0))\n\n    def test_forest_preview_uses_its_most_probable_concrete_member(self) -> None:\n        tree = Tree(\n            Distribution(\n                tokens=(10, 11, 12),\n                probabilities=(0.6, 0.3, 0.1),\n            )\n        )\n        forest = next(row for row in partition_rows(tree, View(), row_limit=2) if row.forest)\n\n        tokens, separator_nats, complete = _row_preview(tree, View(), forest)\n\n        self.assertEqual(tokens, (11,))\n        self.assertEqual(separator_nats, (-math.log(0.3),))\n        self.assertFalse(complete)\n\n    def test_preview_replaces_open_ended_ellipsis_and_dims_only_nodes(self) -> None:\n        row = CompactRow(\n            parent=0,\n            rank=0,\n            depth=0,\n            ancestor_last=(),\n            is_last=True,\n            tokens=(1,),\n            edge_nats=1.0,\n            path_nats=1.0,\n            child=1,\n            open_ended=True,\n        )\n        kwargs = {\n            \"selected\": False,\n            \"columns\": 100,\n            \"display_nats\": 1.0,\n            \"nat_reference\": 1.0,\n            \"branch_nats\": 1.0,\n            \"branch_reference\": 1.0,\n            \"preview_tokens\": (2, 3),\n            \"preview_separator_nats\": (1.5, 2.0),\n            \"preview_complete\": False,\n        }\n\n        plain = _format_tree_row(row, str, color=False, **kwargs)\n        colored = _format_tree_row(row, str, color=True, **kwargs)\n\n        self.assertIn(\"1 · 2 · 3 · …\", plain)\n        self.assertNotIn(\"1 · …\", plain)\n        self.assertIn(f\"\\033[{_PREDICTION_STYLE}m2\\033[0m\", colored)\n        self.assertNotIn(f\"\\033[{_PREDICTION_STYLE}m · \\033[0m\", colored)\n\n    def test_forest_keeps_its_semantic_ellipsis_before_preview(self) -> None:\n        row = CompactRow(\n            parent=0,\n            rank=-1,\n            depth=0,\n            ancestor_last=(),\n            is_last=True,\n            tokens=(),\n            edge_nats=1.0,\n            path_nats=1.0,\n            child=None,\n            forest_count=2,\n            forest_start=1,\n        )\n\n        line = _format_tree_row(\n            row,\n            str,\n            selected=False,\n            columns=100,\n            color=False,\n            preview_tokens=(11,),\n            preview_separator_nats=(2.0,),\n            preview_complete=False,\n        )\n\n        self.assertIn(\"… · 11 · …\", line)\n\n'''
+          replace_once("tests/test_tui.py", test_anchor, preview_tests + test_anchor)
+
+          Path(".github/workflows/implement-continuation-previews.yml").unlink()
+      - name: Commit implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Show discovered continuation previews in spare row width"
+          git push origin HEAD:agent/continuation-previews
