@@ -17,14 +17,14 @@ from contextlib import contextmanager
 from .model import Cursor
 from .query import Suggestion, completions, greedy
 from .session import Checkpoint, Session
-from .view import View, move, parent
+from .view import CompactRow, View, compact_rows, forest_nats, move, parent
 from .worker import SearchWorker
 
 type DescribeToken = Callable[[int], str]
+type DecodeTokens = Callable[[tuple[int, ...]], str]
 
 _KEY_POLL_SECONDS = 0.05
 _REDRAW_SECONDS = 0.25
-_FRAME_OVERHEAD = 13
 _ESCAPE_KEYS = {
     b"\x1b[A": "UP",
     b"\x1b[B": "DOWN",
@@ -87,43 +87,152 @@ def _dimensions() -> tuple[int, int]:
     return columns, rows
 
 
-def _distribution_line_count(
-    terminal_rows: int,
-    requested: int | None,
-    *,
-    debug: bool,
-) -> int:
-    available = max(4, terminal_rows - _FRAME_OVERHEAD - int(debug))
-    if requested is None:
-        return available
-    return min(max(4, requested), available)
-
-
 def _line(text: str, columns: int) -> str:
     return _clip(text, columns)
 
 
-def _tokens(describe: DescribeToken, tokens: tuple[int, ...], limit: int = 18) -> str:
+def _paint(text: str, code: str, *, color: bool) -> str:
+    if not color or not text:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _nat_color(nats: float) -> str:
+    """Map surprisal to a readable 256-color accent for structure, not labels."""
+    if nats < 1.0:
+        return "38;5;82"
+    if nats < 2.0:
+        return "38;5;45"
+    if nats < 4.0:
+        return "38;5;39"
+    if nats < 8.0:
+        return "38;5;75"
+    if nats < 12.0:
+        return "38;5;141"
+    return "38;5;244"
+
+
+def _wrap_spans(
+    spans: tuple[tuple[str, str], ...],
+    width: int,
+    *,
+    color: bool,
+) -> tuple[str, ...]:
+    """Wrap styled plain-text spans without counting ANSI escapes as cells."""
+    if width <= 0:
+        return ("",)
+
+    lines: list[list[tuple[str, str]]] = [[]]
+    used = 0
+
+    def append(char: str, style: str) -> None:
+        nonlocal used
+        if lines[-1] and lines[-1][-1][1] == style:
+            text, _ = lines[-1][-1]
+            lines[-1][-1] = (text + char, style)
+        else:
+            lines[-1].append((char, style))
+        used += _cell_width(char)
+
+    for text, style in spans:
+        for char in text:
+            if char == "\n":
+                lines.append([])
+                used = 0
+                continue
+
+            char_width = _cell_width(char)
+            if used and char_width and used + char_width > width:
+                lines.append([])
+                used = 0
+            append(char, style)
+
+    return tuple(
+        "".join(_paint(text, style, color=color) if style else text for text, style in line)
+        for line in lines
+    )
+
+
+def _sequence_text(
+    describe: DescribeToken,
+    tokens: tuple[int, ...],
+    decode: DecodeTokens | None,
+) -> str:
     if not tokens:
-        return "∅"
-    shown = tokens[-limit:]
-    prefix = "… · " if len(tokens) > limit else ""
-    return prefix + " · ".join(describe(token) for token in shown)
+        return ""
+    if decode is not None:
+        return decode(tokens)
+    return " · ".join(describe(token) for token in tokens)
 
 
-def _format_distribution_row(
-    rank: int,
-    label: str,
-    cost: float,
+def _context_text(
+    context: str,
+    describe: DescribeToken,
+    tokens: tuple[int, ...],
+    decode: DecodeTokens | None,
+) -> str:
+    suffix = _sequence_text(describe, tokens, decode)
+    if not context:
+        return suffix
+    if not suffix:
+        return context
+    if decode is not None:
+        return context + suffix
+    return f"{context} · {suffix}"
+
+
+def _format_tree_row(
+    row: CompactRow,
+    describe: DescribeToken,
     *,
     selected: bool,
     columns: int,
+    color: bool,
 ) -> str:
-    marker = "❯" if selected else " "
-    prefix = f"{marker} {rank:5d}  "
-    suffix = f"  {cost:7.3f} nat"
-    room = max(0, columns - _cell_width(prefix) - _cell_width(suffix))
-    return _clip(prefix + _fit(label, room) + suffix, columns)
+    marker = "❯ " if selected else "  "
+    ancestors = "".join("   " if was_last else "│  " for was_last in row.ancestor_last)
+    branch = "└─ " if row.is_last else "├─ "
+
+    label = " · ".join(describe(token) for token in row.tokens)
+    if row.forest:
+        label = f"{label} · …" if label else "…"
+    elif row.open_ended:
+        label = f"{label} · …"
+
+    suffix = f"  {row.path_nats:7.3f} nat"
+    room = max(
+        0,
+        columns
+        - _cell_width(marker)
+        - _cell_width(ancestors)
+        - _cell_width(branch)
+        - _cell_width(suffix),
+    )
+    label = _fit(label, room)
+
+    return (
+        marker
+        + _paint(ancestors, "2", color=color)
+        + _paint(branch, _nat_color(row.edge_nats), color=color)
+        + _paint(label, "2" if row.forest else "", color=color)
+        + _paint(suffix, _nat_color(row.path_nats), color=color)
+    )
+
+
+def _format_forest_summary(
+    direction: str,
+    count: int,
+    nats: float,
+    *,
+    columns: int,
+    color: bool,
+) -> str:
+    prefix = f"  {direction} … {count} ranks {'above' if direction == '↑' else 'below'}"
+    suffix = f"  {nats:7.3f} nat"
+    room = max(0, columns - _cell_width(suffix))
+    return _paint(_fit(prefix, room), "2", color=color) + _paint(
+        suffix, _nat_color(nats), color=color
+    )
 
 
 @contextmanager
@@ -201,6 +310,8 @@ def _render(
     view: View,
     *,
     title: str,
+    context: str,
+    decode_tokens: DecodeTokens | None,
     budget_nats: float,
     completion_index: int,
     max_tokens: int,
@@ -210,11 +321,13 @@ def _render(
 ) -> tuple[tuple[Suggestion, ...], int]:
     """Render one eventually-consistent frame without mutating model/search state."""
     columns, terminal_rows = _dimensions()
+    color = sys.stdout.isatty()
     rule = "─" * columns
     tree = session.tree
+
     suggestions = completions(
         tree,
-        session.root,
+        view.node,
         max_nats=budget_nats,
         max_tokens=max_tokens,
     )
@@ -225,23 +338,18 @@ def _render(
         completion_index = 0
         suggestion = greedy(
             tree,
-            session.root,
+            view.node,
             max_nats=budget_nats,
             max_tokens=max_tokens,
         )
 
     frame: list[str] = []
-    frame.append(_line(title, columns))
+    frame.append(_paint(_line(title, columns), "1", color=color))
     frame.append(_line(rule, columns))
     frame.append(
         _line(
-            f"budget {budget_nats:.2f} nat / {budget_nats / math.log(2):.2f} bit",
-            columns,
-        )
-    )
-    frame.append(
-        _line(
-            f"search {len(tree.nodes)} nodes  ·  {len(tree.nodes)} distributions"
+            f"budget {budget_nats:.2f} nat / {budget_nats / math.log(2):.2f} bit"
+            f"  ·  {len(tree.nodes)} nodes"
             f"  ·  {len(session.search.frontier)} frontier",
             columns,
         )
@@ -256,72 +364,115 @@ def _render(
         )
 
     frame.append(_line(rule, columns))
-    frame.append(_line(f"committed   {_tokens(describe, tree.path(session.root))}", columns))
-    if suggestion.tokens:
-        suffix = " · …" if not suggestion.complete else ""
-        frame.append(
-            _line(
-                f"suggestion  {_tokens(describe, suggestion.tokens)}{suffix}"
-                f"  [{suggestion.nats:.3f}/{budget_nats:.2f} nat]",
-                columns,
-            )
-        )
-    elif suggestion.next_nats is not None:
-        frame.append(
-            _line(
-                f"suggestion  — next token costs {suggestion.next_nats:.3f} nat",
-                columns,
-            )
-        )
-    else:
-        frame.append(_line("suggestion  ⟳ search has not reached the greedy tail yet", columns))
-
-    distribution = tree[view.node].distribution
+    committed = tree.path(session.root)
     focus = tree.path_from(session.root, view.node)
-    frame.append(_line(f"focus       {_tokens(describe, focus, limit=10)}", columns))
+    context_text = _context_text(context, describe, (*committed, *focus), decode_tokens)
+    suggestion_text = _sequence_text(describe, suggestion.tokens, decode_tokens)
+    if suggestion_text and not suggestion.complete:
+        suggestion_text += "…"
+    context_lines = _wrap_spans(
+        (
+            (context_text or "∅", ""),
+            (suggestion_text, "7"),
+        ),
+        columns,
+        color=color,
+    )
+    frame.extend(context_lines)
     frame.append(_line(rule, columns))
 
+    footer = (
+        _line(rule, columns),
+        _line(
+            "↑↓ rank  ·  ← parent  ·  → child  ·  Space accept  ·  Backspace undo",
+            columns,
+        ),
+        _line(
+            "Tab/Shift-Tab suggestion  ·  [ ] budget  ·  d debug  ·  q quit",
+            columns,
+        ),
+    )
+    tree_lines = max(2, terminal_rows - len(frame) - len(footer))
+    if lines is not None:
+        tree_lines = min(tree_lines, max(2, lines))
+
+    distribution = tree[view.node].distribution
     if not distribution.tokens:
         frame.append(_line("  ∅ terminal", columns))
     else:
         selected = min(view.selected_rank, len(distribution) - 1)
-        line_count = _distribution_line_count(
-            terminal_rows,
-            lines,
-            debug=debug,
+        roots_above = min(max(2, tree_lines // 8), selected - view.first_rank)
+        start = max(view.first_rank, selected - roots_above)
+        edge_limit = max(64, tree_lines * 6)
+        rendered = compact_rows(
+            tree,
+            view,
+            edge_limit=edge_limit,
+            first_rank=start,
         )
-        start = max(view.first_rank, selected - line_count // 2)
-        start = min(start, max(view.first_rank, len(distribution) - line_count))
-        end = min(len(distribution), start + line_count)
-        if start > view.first_rank:
-            frame.append(_line(f"  ↑ … {start - view.first_rank} ranks above", columns))
-        for rank in range(start, end):
+        if not any(
+            row.parent == view.node and row.rank == selected and not row.forest
+            for row in rendered
+        ):
+            start = selected
+            rendered = compact_rows(
+                tree,
+                view,
+                edge_limit=edge_limit,
+                first_rank=start,
+            )
+
+        above = start - view.first_rank
+        reserve_above = int(above > 0)
+        reserve_below = int(start < len(distribution) - 1)
+        row_budget = max(0, tree_lines - reserve_above - reserve_below)
+        visible = rendered[:row_budget]
+
+        if above:
             frame.append(
-                _format_distribution_row(
-                    rank,
-                    describe(distribution.tokens[rank]),
-                    distribution.nats(rank),
-                    selected=rank == selected,
+                _format_forest_summary(
+                    "↑",
+                    above,
+                    forest_nats(distribution, view.first_rank, start),
                     columns=columns,
+                    color=color,
                 )
             )
-        if end < len(distribution):
-            frame.append(_line(f"  ↓ … {len(distribution) - end} ranks below", columns))
 
-    frame.append(_line(rule, columns))
-    frame.append(
-        _line(
-            "↑↓ rank  ·  ← parent  ·  → child  ·  Space accept  ·  Backspace undo",
-            columns,
-        )
-    )
-    frame.append(
-        _line(
-            "Tab/Shift-Tab suggestion  ·  [ ] budget  ·  d debug  ·  q quit",
-            columns,
-        )
-    )
+        for row in visible:
+            frame.append(
+                _format_tree_row(
+                    row,
+                    describe,
+                    selected=(
+                        not row.forest
+                        and row.parent == view.node
+                        and row.rank == selected
+                    ),
+                    columns=columns,
+                    color=color,
+                )
+            )
 
+        root_ranks = [
+            row.rank
+            for row in visible
+            if row.depth == 0 and row.parent == view.node and not row.forest
+        ]
+        last_root = max(root_ranks, default=start - 1)
+        tail_start = max(start, last_root + 1)
+        if tail_start < len(distribution):
+            frame.append(
+                _format_forest_summary(
+                    "↓",
+                    len(distribution) - tail_start,
+                    forest_nats(distribution, tail_start),
+                    columns=columns,
+                    color=color,
+                )
+            )
+
+    frame.extend(footer)
     prefix = "\033[2J\033[H" if sys.stdout.isatty() else ""
     sys.stdout.write(prefix + "\n".join(frame) + "\n")
     sys.stdout.flush()
@@ -337,6 +488,8 @@ class App:
         describe: DescribeToken,
         *,
         title: str,
+        context: str,
+        decode_tokens: DecodeTokens | None,
         max_tokens: int,
         budget_nats: float,
         budget_step: float,
@@ -346,6 +499,8 @@ class App:
         self.worker = SearchWorker(self.session.search)
         self.describe = describe
         self.title = title
+        self.context = context
+        self.decode_tokens = decode_tokens
         self.max_tokens = max_tokens
         self.budget_nats = budget_nats
         self.budget_step = budget_step
@@ -370,6 +525,8 @@ class App:
             self.describe,
             self.view,
             title=self.title,
+            context=self.context,
+            decode_tokens=self.decode_tokens,
             budget_nats=self.budget_nats,
             completion_index=self.completion_index,
             max_tokens=self.max_tokens,
@@ -432,6 +589,7 @@ class App:
             self.view = self.view_history.pop()
         else:
             self.view = parent(self.session.tree, self.view)
+        self.completion_index = 0
 
     def _undo(self) -> bool:
         if not self.history:
@@ -443,11 +601,13 @@ class App:
 
     def _accept(self) -> bool:
         suggestion = self._selected_suggestion()
-        if not suggestion.tokens:
+        focus = self.session.tree.path_from(self.session.root, self.view.node)
+        tokens = (*focus, *suggestion.tokens)
+        if not tokens:
             return False
         with self.worker.access():
             self.history.append(self.session.checkpoint())
-            self.session.commit(suggestion.tokens)
+            self.session.commit(tokens)
         self._reset_view()
         return True
 
@@ -456,7 +616,7 @@ class App:
             return self.suggestions[self.completion_index % len(self.suggestions)]
         return greedy(
             self.session.tree,
-            self.session.root,
+            self.view.node,
             max_nats=self.budget_nats,
             max_tokens=self.max_tokens,
         )
@@ -474,6 +634,7 @@ class App:
 
         self.view_history.append(self.view)
         self.view = View(node=child)
+        self.completion_index = 0
         return True
 
     def _reset_view(self) -> None:
@@ -487,6 +648,8 @@ def run_tui(
     describe: DescribeToken,
     *,
     title: str,
+    context: str = "",
+    decode_tokens: DecodeTokens | None = None,
     max_tokens: int = 256,
     budget_nats: float = 1.5,
     budget_step: float = 0.25,
@@ -503,6 +666,8 @@ def run_tui(
         cursor,
         describe,
         title=title,
+        context=context,
+        decode_tokens=decode_tokens,
         max_tokens=max_tokens,
         budget_nats=budget_nats,
         budget_step=budget_step,
