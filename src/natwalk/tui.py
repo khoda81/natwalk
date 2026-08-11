@@ -23,6 +23,10 @@ from .worker import SearchWorker
 
 DescribeToken = Callable[[int], str]
 
+_KEY_POLL_SECONDS = 0.05
+_REDRAW_SECONDS = 0.25
+_FRAME_OVERHEAD = 14
+
 
 def _cell_width(text: str) -> int:
     """Return the terminal-cell width of plain Unicode text."""
@@ -66,13 +70,27 @@ def _fit(text: str, width: int) -> str:
     return clipped + " " * max(0, width - _cell_width(clipped))
 
 
-def _columns() -> int:
-    columns = shutil.get_terminal_size((100, 30)).columns
-    return columns if columns > 0 else 100
+def _dimensions() -> tuple[int, int]:
+    size = shutil.get_terminal_size((100, 30))
+    columns = size.columns if size.columns > 0 else 100
+    rows = size.lines if size.lines > 0 else 30
+    return columns, rows
 
 
-def _line(text: str, columns: int) -> None:
-    print(_clip(text, columns))
+def _distribution_line_count(
+    terminal_rows: int,
+    requested: int | None,
+    *,
+    debug: bool,
+) -> int:
+    available = max(4, terminal_rows - _FRAME_OVERHEAD - int(debug))
+    if requested is None:
+        return available
+    return min(max(4, requested), available)
+
+
+def _line(text: str, columns: int) -> str:
+    return _clip(text, columns)
 
 
 def _tokens(describe: DescribeToken, tokens: tuple[int, ...], limit: int = 18) -> str:
@@ -116,7 +134,7 @@ def _terminal():
         sys.stdout.flush()
 
 
-def _read_key(timeout: float = 0.20) -> str | None:
+def _read_key(timeout: float = _KEY_POLL_SECONDS) -> str | None:
     if not sys.stdin.isatty():
         return input("> ").strip()[:1]
 
@@ -171,13 +189,10 @@ def _render(
     budget_nats: float,
     completion_index: int,
     max_tokens: int,
-    lines: int,
+    lines: int | None,
     debug: bool,
 ) -> tuple[tuple[Suggestion, ...], int]:
-    if sys.stdout.isatty():
-        sys.stdout.write("\033[2J\033[H")
-
-    columns = _columns()
+    columns, terminal_rows = _dimensions()
     rule = "─" * columns
     tree = session.tree
     suggestions = completions(
@@ -191,82 +206,118 @@ def _render(
         suggestion = suggestions[completion_index]
     else:
         completion_index = 0
-        suggestion = greedy(tree, session.root, max_nats=budget_nats, max_tokens=max_tokens)
+        suggestion = greedy(
+            tree,
+            session.root,
+            max_nats=budget_nats,
+            max_tokens=max_tokens,
+        )
 
-    _line(title, columns)
-    _line(rule, columns)
-    _line(
-        f"budget {budget_nats:.2f} nat / {budget_nats / math.log(2):.2f} bit"
-        f"  ·  action {math.log2(navigation.choices):.2f} bit",
-        columns,
+    frame: list[str] = []
+    frame.append(_line(title, columns))
+    frame.append(_line(rule, columns))
+    frame.append(
+        _line(
+            f"budget {budget_nats:.2f} nat / {budget_nats / math.log(2):.2f} bit"
+            f"  ·  action {math.log2(navigation.choices):.2f} bit",
+            columns,
+        )
     )
 
     known = sum(node.distribution is not None for node in tree.nodes)
-    _line(
-        f"search {len(tree.nodes)} nodes  ·  {known} distributions"
-        f"  ·  {len(session.search.frontier)} frontier",
-        columns,
+    frame.append(
+        _line(
+            f"search {len(tree.nodes)} nodes  ·  {known} distributions"
+            f"  ·  {len(session.search.frontier)} frontier",
+            columns,
+        )
     )
     if debug:
-        _line(
-            f"interval [{navigation.state.lo:.9f}, {navigation.state.hi:.9f})"
-            f"  ·  actions {navigation.state.actions}  ·  undo {navigation.undo_depth}",
-            columns,
+        frame.append(
+            _line(
+                f"interval [{navigation.state.lo:.9f}, {navigation.state.hi:.9f})"
+                f"  ·  actions {navigation.state.actions}"
+                f"  ·  undo {navigation.undo_depth}",
+                columns,
+            )
         )
 
-    _line(rule, columns)
-    _line(f"committed   {_tokens(describe, tree.path(session.root))}", columns)
+    frame.append(_line(rule, columns))
+    frame.append(_line(f"committed   {_tokens(describe, tree.path(session.root))}", columns))
     if suggestion.tokens:
         suffix = " · …" if not suggestion.complete else ""
-        _line(
-            f"suggestion  {_tokens(describe, suggestion.tokens)}{suffix}"
-            f"  [{suggestion.nats:.3f}/{budget_nats:.2f} nat]",
-            columns,
+        frame.append(
+            _line(
+                f"suggestion  {_tokens(describe, suggestion.tokens)}{suffix}"
+                f"  [{suggestion.nats:.3f}/{budget_nats:.2f} nat]",
+                columns,
+            )
         )
     elif suggestion.next_nats is not None:
-        _line(f"suggestion  — next token costs {suggestion.next_nats:.3f} nat", columns)
+        frame.append(
+            _line(
+                f"suggestion  — next token costs {suggestion.next_nats:.3f} nat",
+                columns,
+            )
+        )
     else:
-        _line("suggestion  ⟳ search has not reached the greedy tail yet", columns)
+        frame.append(
+            _line("suggestion  ⟳ search has not reached the greedy tail yet", columns)
+        )
 
     distribution = session.inspect(view.node)
     focus = tree.path_from(session.root, view.node)
-    _line(f"focus       {_tokens(describe, focus, limit=10)}", columns)
-    _line(rule, columns)
+    frame.append(_line(f"focus       {_tokens(describe, focus, limit=10)}", columns))
+    frame.append(_line(rule, columns))
 
     count = len(distribution)
     if count == 0:
-        _line("  ∅ terminal", columns)
+        frame.append(_line("  ∅ terminal", columns))
     else:
         selected = min(view.selected_rank, count - 1)
-        line_count = max(4, lines)
+        line_count = _distribution_line_count(
+            terminal_rows,
+            lines,
+            debug=debug,
+        )
         start = max(view.first_rank, selected - line_count // 2)
         start = min(start, max(view.first_rank, count - line_count))
         end = min(count, start + line_count)
         if start > view.first_rank:
-            _line(f"  ↑ … {start - view.first_rank} ranks above", columns)
+            frame.append(_line(f"  ↑ … {start - view.first_rank} ranks above", columns))
         for rank in range(start, end):
             token = distribution.tokens[rank]
-            _line(
+            frame.append(
                 _format_distribution_row(
                     rank,
                     describe(token),
                     distribution.nats(rank),
                     selected=rank == selected,
                     columns=columns,
-                ),
-                columns,
+                )
             )
         if end < count:
-            _line(f"  ↓ … {count - end} ranks below", columns)
+            frame.append(_line(f"  ↓ … {count - end} ranks below", columns))
 
-    _line(rule, columns)
+    frame.append(_line(rule, columns))
     max_choice = min(9, navigation.choices - 1)
     choice_hint = "0 choose" if max_choice == 0 else f"0–{max_choice} choose"
-    _line(
-        f"↑↓ rank  ·  ← parent  ·  → child  ·  {choice_hint}  ·  Space accept  ·  Backspace undo",
-        columns,
+    frame.append(
+        _line(
+            f"↑↓ rank  ·  ← parent  ·  → child  ·  {choice_hint}"
+            "  ·  Space accept  ·  Backspace undo",
+            columns,
+        )
     )
-    _line("Tab/Shift-Tab suggestion  ·  [ ] budget  ·  d debug  ·  q quit", columns)
+    frame.append(
+        _line(
+            "Tab/Shift-Tab suggestion  ·  [ ] budget  ·  d debug  ·  q quit",
+            columns,
+        )
+    )
+
+    prefix = "\033[2J\033[H" if sys.stdout.isatty() else ""
+    sys.stdout.write(prefix + "\n".join(frame) + "\n")
     sys.stdout.flush()
     return suggestions, completion_index
 
@@ -280,7 +331,7 @@ def run_tui(
     max_tokens: int = 256,
     budget_nats: float = 1.5,
     budget_step: float = 0.25,
-    lines: int = 16,
+    lines: int | None = None,
 ) -> None:
     session = Session(cursor)
     navigation = Navigation(session, choices=choices)
@@ -289,81 +340,113 @@ def run_tui(
     debug = False
 
     try:
-        with _terminal(), SearchWorker(session.search) as worker:
-            while True:
-                with worker.access():
-                    suggestions, completion_index = _render(
-                        session,
-                        navigation,
-                        describe,
-                        view,
-                        title=title,
-                        budget_nats=budget_nats,
-                        completion_index=completion_index,
-                        max_tokens=max_tokens,
-                        lines=lines,
-                        debug=debug,
-                    )
-                    terminal = not session.distribution().tokens
-                if terminal:
-                    break
+        with _terminal():
+            suggestions, completion_index = _render(
+                session,
+                navigation,
+                describe,
+                view,
+                title=title,
+                budget_nats=budget_nats,
+                completion_index=completion_index,
+                max_tokens=max_tokens,
+                lines=lines,
+                debug=debug,
+            )
+            if not session.distribution().tokens:
+                return
 
-                key = _read_key()
-                if key is None:
-                    continue
-                if key.lower() == "q":
-                    break
-                if key.lower() == "d":
-                    debug = not debug
-                    continue
-                if key == "[":
-                    budget_nats = max(0.0, budget_nats - budget_step)
-                    completion_index = 0
-                    continue
-                if key == "]":
-                    budget_nats += budget_step
-                    completion_index = 0
-                    continue
-                if key == "TAB" and suggestions:
-                    completion_index = (completion_index + 1) % len(suggestions)
-                    continue
-                if key == "BACKTAB" and suggestions:
-                    completion_index = (completion_index - 1) % len(suggestions)
-                    continue
+            last_render = time.monotonic()
+            with SearchWorker(session.search) as worker:
+                while True:
+                    key = _read_key()
+                    dirty = False
+                    terminal = False
 
-                with worker.access():
-                    if key in ("\x7f", "\b"):
-                        if navigation.undo():
-                            view = View(node=session.root)
+                    if key is not None:
+                        if key.lower() == "q":
+                            break
+                        if key.lower() == "d":
+                            debug = not debug
+                            dirty = True
+                        elif key == "[":
+                            budget_nats = max(0.0, budget_nats - budget_step)
                             completion_index = 0
-                    elif key in (" ", "\r", "\n"):
-                        if suggestions:
-                            suggestion = suggestions[completion_index % len(suggestions)]
+                            dirty = True
+                        elif key == "]":
+                            budget_nats += budget_step
+                            completion_index = 0
+                            dirty = True
+                        elif key == "TAB" and suggestions:
+                            completion_index = (completion_index + 1) % len(suggestions)
+                            dirty = True
+                        elif key == "BACKTAB" and suggestions:
+                            completion_index = (completion_index - 1) % len(suggestions)
+                            dirty = True
                         else:
-                            suggestion = greedy(
-                                session.tree,
-                                session.root,
-                                max_nats=budget_nats,
+                            with worker.access():
+                                if key in ("\x7f", "\b"):
+                                    if navigation.undo():
+                                        view = View(node=session.root)
+                                        completion_index = 0
+                                        dirty = True
+                                elif key in (" ", "\r", "\n"):
+                                    if suggestions:
+                                        suggestion = suggestions[
+                                            completion_index % len(suggestions)
+                                        ]
+                                    else:
+                                        suggestion = greedy(
+                                            session.tree,
+                                            session.root,
+                                            max_nats=budget_nats,
+                                            max_tokens=max_tokens,
+                                        )
+                                    if suggestion.tokens:
+                                        navigation.accept(suggestion.tokens)
+                                        view = View(node=session.root)
+                                        completion_index = 0
+                                        dirty = True
+                                elif key.isdigit() and int(key) < choices:
+                                    navigation.choose(int(key))
+                                    view = View(node=session.root)
+                                    completion_index = 0
+                                    dirty = True
+                                elif key == "UP":
+                                    view = move(session.tree, view, -1)
+                                    dirty = True
+                                elif key == "DOWN":
+                                    view = move(session.tree, view, 1)
+                                    dirty = True
+                                elif key == "LEFT" and view.node != session.root:
+                                    view = parent(session.tree, view)
+                                    dirty = True
+                                elif key == "RIGHT":
+                                    distribution = session.inspect(view.node)
+                                    if distribution.tokens:
+                                        view = enter(session.tree, view)
+                                        session.inspect(view.node)
+                                        dirty = True
+
+                    now = time.monotonic()
+                    if dirty or now - last_render >= _REDRAW_SECONDS:
+                        with worker.access():
+                            suggestions, completion_index = _render(
+                                session,
+                                navigation,
+                                describe,
+                                view,
+                                title=title,
+                                budget_nats=budget_nats,
+                                completion_index=completion_index,
                                 max_tokens=max_tokens,
+                                lines=lines,
+                                debug=debug,
                             )
-                        if suggestion.tokens:
-                            navigation.accept(suggestion.tokens)
-                            view = View(node=session.root)
-                            completion_index = 0
-                    elif key.isdigit() and int(key) < choices:
-                        navigation.choose(int(key))
-                        view = View(node=session.root)
-                        completion_index = 0
-                    elif key == "UP":
-                        view = move(session.tree, view, -1)
-                    elif key == "DOWN":
-                        view = move(session.tree, view, 1)
-                    elif key == "LEFT" and view.node != session.root:
-                        view = parent(session.tree, view)
-                    elif key == "RIGHT":
-                        distribution = session.inspect(view.node)
-                        if distribution.tokens:
-                            view = enter(session.tree, view)
-                            session.inspect(view.node)
+                            terminal = not session.distribution().tokens
+                        last_render = now
+
+                    if terminal:
+                        break
     except KeyboardInterrupt:
         pass
