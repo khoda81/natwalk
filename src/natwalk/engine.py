@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from .model import Cursor
 from .session import Checkpoint, Session
-from .sync import NodeUpdate, TreeReplica, updates
+from .sync import NodeUpdate, RevealUpdate, TreeReplica, reveal, updates
 from .tree import NodeId
 
 type CommandId = int
@@ -32,16 +32,23 @@ class Rewind:
 
 
 @dataclass(frozen=True, slots=True)
+class Reveal:
+    node: NodeId
+    start: int
+    stop: int
+
+
+@dataclass(frozen=True, slots=True)
 class Stop:
     pass
 
 
-type Command = Advance | Rewind | Stop
+type Command = Advance | Rewind | Reveal | Stop
 
 
 @dataclass(frozen=True, slots=True)
 class TreeUpdates:
-    nodes: tuple[NodeUpdate, ...]
+    nodes: tuple[NodeUpdate | RevealUpdate, ...]
     frontier: int
 
 
@@ -72,7 +79,7 @@ class EngineError(RuntimeError):
 
 
 class EngineClient:
-    """Client-side process transport plus an idempotent tree replica."""
+    """Client-side process transport plus a progressive idempotent tree replica."""
 
     def __init__(
         self,
@@ -99,6 +106,7 @@ class EngineClient:
         self._done: dict[CommandId, CommandDone] = {}
         self._next_command = 0
         self._failure: EngineFailed | None = None
+        self._reveal_targets: dict[NodeId, int] = {}
 
     def __enter__(self) -> EngineClient:
         self.start()
@@ -146,7 +154,7 @@ class EngineClient:
         self._next_command += 1
         return command_id
 
-    def send(self, command: Advance | Rewind) -> None:
+    def send(self, command: Command) -> None:
         self._raise_failure()
         self._commands.put(command)
 
@@ -159,6 +167,17 @@ class EngineClient:
         command_id = self.command_id()
         self.send(Rewind(command_id))
         return command_id
+
+    def reveal(self, node: NodeId, stop: int) -> None:
+        """Request a larger concrete ranked prefix for one replica node."""
+        distribution = self.tree[node].distribution
+        start = distribution.revealed
+        stop = min(stop, len(distribution))
+        pending = self._reveal_targets.get(node, start)
+        if stop <= max(start, pending):
+            return
+        self._reveal_targets[node] = stop
+        self.send(Reveal(node, start, stop))
 
     def poll(self) -> int:
         """Apply every currently queued engine event and return the count."""
@@ -205,6 +224,11 @@ class EngineClient:
         if isinstance(event, TreeUpdates):
             self.replica.apply_many(event.nodes)
             self.frontier = event.frontier
+            for update in event.nodes:
+                distribution = self.tree[update.node].distribution
+                target = self._reveal_targets.get(update.node)
+                if target is not None and distribution.revealed >= target:
+                    del self._reveal_targets[update.node]
         elif isinstance(event, EngineState):
             self.root = event.root
             self.rewind_depth = event.rewind_depth
@@ -244,6 +268,15 @@ def _run_engine(factory: CursorFactory, commands, events, max_tree_bytes: int | 
             if isinstance(command, Stop):
                 return False
 
+            if isinstance(command, Reveal):
+                events.put(
+                    TreeUpdates(
+                        (reveal(session.tree, command.node, command.start, command.stop),),
+                        len(session.search.frontier),
+                    )
+                )
+                return True
+
             previous = completed.get(command.command_id)
             if previous is not None:
                 events.put(CommandDone(command.command_id, previous))
@@ -271,10 +304,9 @@ def _run_engine(factory: CursorFactory, commands, events, max_tree_bytes: int | 
         def can_search() -> bool:
             if max_tree_bytes is None:
                 return True
-            # The authoritative tree and client replica retain approximately the
-            # same packed distribution payload. Commands may cross this soft cap;
-            # only autonomous background discovery is paused.
-            return 2 * session.tree.storage_bytes < max_tree_bytes
+            # The UI replica now retains only small revealed prefixes, so this
+            # soft cap is dominated by the authoritative backend distributions.
+            return session.tree.storage_bytes < max_tree_bytes
 
         publish_tree()
         publish_state()
