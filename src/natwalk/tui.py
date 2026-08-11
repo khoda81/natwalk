@@ -13,12 +13,12 @@ import tty
 import unicodedata
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 
-from .model import Cursor
+from .engine import CommandId, CursorFactory, EngineClient
 from .query import Suggestion, completions, greedy
-from .session import Checkpoint, Session
+from .tree import NodeId, Tree
 from .view import CompactRow, View, compact_rows, forest_nats, move, parent
-from .worker import SearchWorker
 
 type DescribeToken = Callable[[int], str]
 type DecodeTokens = Callable[[tuple[int, ...]], str]
@@ -305,7 +305,9 @@ def _read_keys(timeout: float = _KEY_POLL_SECONDS) -> tuple[str, ...]:
 
 
 def _render(
-    session: Session,
+    tree: Tree,
+    root: NodeId,
+    frontier: int,
     describe: DescribeToken,
     view: View,
     *,
@@ -319,11 +321,10 @@ def _render(
     debug: bool,
     undo_depth: int,
 ) -> tuple[tuple[Suggestion, ...], int]:
-    """Render one eventually-consistent frame without mutating model/search state."""
+    """Render one frame from replicated tree state without contacting the engine."""
     columns, terminal_rows = _dimensions()
     color = sys.stdout.isatty()
     rule = "─" * columns
-    tree = session.tree
 
     suggestions = completions(
         tree,
@@ -350,22 +351,22 @@ def _render(
         _line(
             f"budget {budget_nats:.2f} nat / {budget_nats / math.log(2):.2f} bit"
             f"  ·  {len(tree.nodes)} nodes"
-            f"  ·  {len(session.search.frontier)} frontier",
+            f"  ·  {frontier} frontier",
             columns,
         )
     )
     if debug:
         frame.append(
             _line(
-                f"root {session.root}  ·  view {view.node}:{view.first_rank}/{view.selected_rank}"
+                f"root {root}  ·  view {view.node}:{view.first_rank}/{view.selected_rank}"
                 f"  ·  undo {undo_depth}",
                 columns,
             )
         )
 
     frame.append(_line(rule, columns))
-    committed = tree.path(session.root)
-    focus = tree.path_from(session.root, view.node)
+    committed = tree.path(root)
+    focus = tree.path_from(root, view.node)
     context_text = _context_text(context, describe, (*committed, *focus), decode_tokens)
     suggestion_text = _sequence_text(describe, suggestion.tokens, decode_tokens)
     if suggestion_text and not suggestion.complete:
@@ -373,7 +374,7 @@ def _render(
     context_lines = _wrap_spans(
         (
             (context_text or "∅", ""),
-            (suggestion_text, "7"),
+            (suggestion_text, "1"),
         ),
         columns,
         color=color,
@@ -474,12 +475,31 @@ def _render(
     return suggestions, completion_index
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingEnter:
+    command_id: CommandId
+    view: View
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingCommit:
+    command_id: CommandId
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingUndo:
+    command_id: CommandId
+
+
+type _Pending = _PendingEnter | _PendingCommit | _PendingUndo
+
+
 class App:
-    """Interactive TUI state and key dispatch around one natwalk session."""
+    """Interactive client state around one process-isolated natwalk engine."""
 
     def __init__(
         self,
-        cursor: Cursor,
+        factory: CursorFactory,
         describe: DescribeToken,
         *,
         title: str,
@@ -490,8 +510,14 @@ class App:
         budget_step: float,
         lines: int | None,
     ) -> None:
-        self.session = Session(cursor)
-        self.worker = SearchWorker(self.session.search)
+        self.engine = EngineClient(factory)
+        self.engine.start()
+        try:
+            self.engine.wait_ready()
+        except BaseException:
+            self.engine.terminate()
+            raise
+
         self.describe = describe
         self.title = title
         self.context = context
@@ -501,22 +527,56 @@ class App:
         self.budget_step = budget_step
         self.lines = lines
 
-        self.history: list[Checkpoint] = []
-        self.view = View(node=self.session.root)
+        self.view = View(node=self.root)
         self.view_history: list[View] = []
         self.completion_index = 0
         self.suggestions: tuple[Suggestion, ...] = ()
+        self.pending: _Pending | None = None
         self.debug = False
         self.quit_requested = False
         self.last_render = 0.0
 
     @property
+    def tree(self) -> Tree:
+        return self.engine.tree
+
+    @property
+    def root(self) -> NodeId:
+        root = self.engine.root
+        if root is None:
+            raise RuntimeError("engine has no root")
+        return root
+
+    @property
     def terminal(self) -> bool:
-        return not self.session.tree[self.session.root].distribution.tokens
+        return not self.tree[self.root].distribution.tokens
+
+    def poll(self) -> bool:
+        """Apply engine events and complete any pending UI intent."""
+        changed = self.engine.poll() > 0
+        pending = self.pending
+        if pending is None:
+            return changed
+
+        done = self.engine.take_done(pending.command_id)
+        if done is None:
+            return changed
+
+        self.pending = None
+        if isinstance(pending, _PendingEnter):
+            if self.view == pending.view:
+                self.view_history.append(pending.view)
+                self.view = View(node=done.node)
+                self.completion_index = 0
+        else:
+            self._reset_view()
+        return True
 
     def render(self) -> None:
         self.suggestions, self.completion_index = _render(
-            self.session,
+            self.tree,
+            self.root,
+            self.engine.frontier,
             self.describe,
             self.view,
             title=self.title,
@@ -527,7 +587,7 @@ class App:
             max_tokens=self.max_tokens,
             lines=self.lines,
             debug=self.debug,
-            undo_depth=len(self.history),
+            undo_depth=self.engine.history_depth,
         )
         self.last_render = time.monotonic()
 
@@ -563,12 +623,12 @@ class App:
             self.completion_index = (self.completion_index - 1) % len(self.suggestions)
             return True
         if key == "UP":
-            self.view = move(self.session.tree, self.view, -1)
+            self.view = move(self.tree, self.view, -1)
             return True
         if key == "DOWN":
-            self.view = move(self.session.tree, self.view, 1)
+            self.view = move(self.tree, self.view, 1)
             return True
-        if key == "LEFT" and self.view.node != self.session.root:
+        if key == "LEFT" and self.view.node != self.root:
             self._leave_child()
             return True
         if key in ("\x7f", "\b"):
@@ -583,49 +643,51 @@ class App:
         if self.view_history:
             self.view = self.view_history.pop()
         else:
-            self.view = parent(self.session.tree, self.view)
+            self.view = parent(self.tree, self.view)
         self.completion_index = 0
 
     def _undo(self) -> bool:
-        if not self.history:
+        if self.pending is not None or self.engine.history_depth == 0:
             return False
-        with self.worker.access():
-            self.session.restore(self.history.pop())
-        self._reset_view()
-        return True
+        self.pending = _PendingUndo(self.engine.undo())
+        return False
 
     def _accept(self) -> bool:
+        if self.pending is not None:
+            return False
         suggestion = self._selected_suggestion()
-        focus = self.session.tree.path_from(self.session.root, self.view.node)
+        focus = self.tree.path_from(self.root, self.view.node)
         tokens = (*focus, *suggestion.tokens)
         if not tokens:
             return False
-        with self.worker.access():
-            self.history.append(self.session.checkpoint())
-            self.session.commit(tokens)
-        self._reset_view()
-        return True
+        self.pending = _PendingCommit(self.engine.commit(tokens))
+        return False
 
     def _selected_suggestion(self) -> Suggestion:
         if self.suggestions:
             return self.suggestions[self.completion_index % len(self.suggestions)]
         return greedy(
-            self.session.tree,
+            self.tree,
             self.view.node,
             max_nats=self.budget_nats,
             max_tokens=self.max_tokens,
         )
 
     def _enter_child(self) -> bool:
-        distribution = self.session.tree[self.view.node].distribution
+        distribution = self.tree[self.view.node].distribution
         if not distribution.tokens:
             return False
 
         selected = min(self.view.selected_rank, len(distribution) - 1)
-        child = self.session.tree.child(self.view.node, selected)
+        child = self.tree.child(self.view.node, selected)
         if child is None:
-            with self.worker.access():
-                child = self.session.inspect_child(self.view.node, selected)
+            if self.pending is not None:
+                return False
+            self.pending = _PendingEnter(
+                self.engine.inspect(self.view.node, selected),
+                self.view,
+            )
+            return False
 
         self.view_history.append(self.view)
         self.view = View(node=child)
@@ -633,13 +695,13 @@ class App:
         return True
 
     def _reset_view(self) -> None:
-        self.view = View(node=self.session.root)
+        self.view = View(node=self.root)
         self.view_history.clear()
         self.completion_index = 0
 
 
 def run_tui(
-    cursor: Cursor,
+    factory: CursorFactory,
     describe: DescribeToken,
     *,
     title: str,
@@ -649,16 +711,10 @@ def run_tui(
     budget_nats: float = 1.5,
     budget_step: float = 0.25,
     lines: int | None = None,
-    exit_on_quit: bool = False,
 ) -> None:
-    """Run the terminal UI.
-
-    ``exit_on_quit`` is intended for standalone CLI applications. It restores
-    the terminal and then terminates the process immediately instead of waiting
-    for an uninterruptible native model call in the daemon search thread.
-    """
+    """Run a responsive terminal client around a process-isolated model engine."""
     app = App(
-        cursor,
+        factory,
         describe,
         title=title,
         context=context,
@@ -668,30 +724,23 @@ def run_tui(
         budget_step=budget_step,
         lines=lines,
     )
-    exit_code: int | None = None
+    hard_stop = False
 
     try:
         with _terminal():
             app.render()
-            if app.terminal:
-                return
-
-            app.worker.start()
             while not app.terminal:
-                app.worker.raise_if_failed()
-                redraw = app.handle_keys(_read_keys())
+                redraw = app.poll()
+                redraw = app.handle_keys(_read_keys()) or redraw
                 if app.quit_requested:
-                    exit_code = 0
+                    hard_stop = True
                     break
                 if redraw or time.monotonic() - app.last_render >= _REDRAW_SECONDS:
                     app.render()
     except KeyboardInterrupt:
-        exit_code = 130
+        hard_stop = True
     finally:
-        if exit_code is not None and exit_on_quit:
-            app.worker.request_stop()
+        if hard_stop:
+            app.engine.terminate()
         else:
-            app.worker.close()
-
-    if exit_code is not None and exit_on_quit:
-        os._exit(exit_code)
+            app.engine.close()
