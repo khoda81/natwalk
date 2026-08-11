@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from natwalk.tui import _cell_width, _clip, _fit, _format_distribution_row
+from natwalk.tui import (
+    _cell_width,
+    _clip,
+    _distribution_line_count,
+    _fit,
+    _format_distribution_row,
+)
 
 
 class TerminalWidthTests(unittest.TestCase):
@@ -33,6 +39,12 @@ class TerminalWidthTests(unittest.TestCase):
                         columns=columns,
                     )
                     self.assertLessEqual(_cell_width(row), columns)
+
+    def test_distribution_rows_fill_but_never_overflow_terminal(self) -> None:
+        self.assertEqual(_distribution_line_count(40, None, debug=False), 26)
+        self.assertEqual(_distribution_line_count(40, 100, debug=False), 26)
+        self.assertEqual(_distribution_line_count(40, 10, debug=False), 10)
+        self.assertEqual(_distribution_line_count(40, None, debug=True), 25)
 
 
 if __name__ == "__main__":
