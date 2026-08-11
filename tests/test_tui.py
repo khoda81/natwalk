@@ -123,7 +123,9 @@ class TerminalWidthTests(unittest.TestCase):
         )
 
     def test_exact_text_suggestion_keeps_backend_spacing(self) -> None:
-        decode = lambda tokens: " that it"
+        def decode(_tokens: tuple[int, ...]) -> str:
+            return " that it"
+
         spans = _context_spans("information theory is", " that it", decode)
 
         self.assertEqual(
