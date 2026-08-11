@@ -133,7 +133,9 @@ class TokenDisplay:
 
 def load_model(args: argparse.Namespace) -> tuple[Llama, Path]:
     path = (
-        Path(args.model_path).expanduser() if args.model_path else resolve_ollama_gguf(args.model)
+        Path(args.model_path).expanduser()
+        if args.model_path
+        else resolve_ollama_gguf(args.model)
     )
     print(f"Loading {path} …", file=sys.stderr)
     kwargs: dict[str, object] = {
@@ -166,7 +168,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threads", type=int)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--choices", type=int, default=2)
-    parser.add_argument("--tree-lines", type=int, default=16)
+    parser.add_argument(
+        "--tree-lines",
+        type=int,
+        help="maximum visible distribution rows; default fills the terminal",
+    )
     parser.add_argument("--budget-nats", type=float, default=1.5)
     parser.add_argument("--budget-step", type=float, default=0.25)
     parser.add_argument("--llama-verbose", action="store_true")
