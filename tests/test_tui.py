@@ -276,7 +276,7 @@ class TerminalWidthTests(unittest.TestCase):
 
         self.assertEqual(
             _row_separator_nats(tree, View(), row),
-            (-math.log(0.6) - math.log(0.7),),
+            (-math.log(0.7),),
         )
 
     def test_row_preview_walks_only_known_greedy_children(self) -> None:
@@ -311,7 +311,7 @@ class TerminalWidthTests(unittest.TestCase):
         self.assertEqual(tokens, (20, 30))
         self.assertEqual(
             separator_nats,
-            (-math.log(0.75), -math.log(0.75)),
+            (-math.log(0.75), -math.log(1.0)),
         )
         self.assertFalse(complete)
         self.assertEqual(len(tree.nodes), before)
