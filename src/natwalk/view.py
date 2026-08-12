@@ -16,7 +16,6 @@ class View:
 
     node: NodeId = 0
     first_rank: int = 0
-    selected_rank: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,8 +560,8 @@ def _partition_layout_rows(
 
 
 def enter(tree: Tree, view: View) -> View:
-    """Focus the selected child if it has already been discovered."""
-    child = tree.child(view.node, view.selected_rank)
+    """Focus the first visible child if it has already been discovered."""
+    child = tree.child(view.node, view.first_rank)
     if child is None:
         raise ValueError("cannot enter an undiscovered child")
     return View(node=child)
@@ -573,14 +572,14 @@ def parent(tree: Tree, view: View) -> View:
     node = tree[view.node]
     if node.parent is None:
         return view
-    return View(node=node.parent, first_rank=node.rank, selected_rank=node.rank)
+    return View(node=node.parent, first_rank=node.rank)
 
 
 def move(tree: Tree, view: View, delta: int) -> View:
-    """Move selection within the currently revealed sibling prefix."""
+    """Scroll the visible sibling suffix within the revealed prefix."""
     distribution = tree[view.node].distribution
     if distribution.revealed == 0:
         return view
     last = distribution.revealed - 1
-    selected = min(max(view.selected_rank + delta, view.first_rank), last)
-    return View(node=view.node, first_rank=view.first_rank, selected_rank=selected)
+    first_rank = min(max(view.first_rank + delta, 0), last)
+    return View(node=view.node, first_rank=first_rank)
