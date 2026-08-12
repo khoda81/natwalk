@@ -48,6 +48,7 @@ type Command = Advance | Rewind | Reveal | Stop
 class TreeUpdates:
     nodes: tuple[TreeUpdate, ...]
     frontier: int
+    authoritative_distribution_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +107,7 @@ class EngineClient:
         self.root: NodeId | None = None
         self.rewind_depth = 0
         self.frontier = 0
+        self.authoritative_distribution_bytes = 0
         self._done: dict[CommandId, CommandDone] = {}
         self._next_command = 0
         self._failure: EngineFailed | None = None
@@ -125,6 +127,11 @@ class EngineClient:
         if tree is None:
             raise RuntimeError("engine has not published its root yet")
         return tree
+
+    @property
+    def pid(self) -> int | None:
+        """Process id of the isolated engine after it has been started."""
+        return self._process.pid
 
     @property
     def alive(self) -> bool:
@@ -227,6 +234,7 @@ class EngineClient:
         if isinstance(event, TreeUpdates):
             self.replica.apply_many(event.nodes)
             self.frontier = event.frontier
+            self.authoritative_distribution_bytes = event.authoritative_distribution_bytes
             for update in event.nodes:
                 distribution = self.tree[update.node].distribution
                 target = self._reveal_targets.get(update.node)
@@ -261,7 +269,13 @@ def _run_engine(factory: CursorFactory, commands, events, max_tree_bytes: int | 
         def publish_tree() -> None:
             nonlocal published
             batch = updates(session.tree, start=published)
-            events.put(TreeUpdates(batch, len(session.search.frontier)))
+            events.put(
+                TreeUpdates(
+                    batch,
+                    len(session.search.frontier),
+                    session.tree.storage_bytes,
+                )
+            )
             published = len(session.tree.nodes)
 
         def publish_state() -> None:
@@ -276,6 +290,7 @@ def _run_engine(factory: CursorFactory, commands, events, max_tree_bytes: int | 
                     TreeUpdates(
                         (reveal(session.tree, command.node, command.start, command.stop),),
                         len(session.search.frontier),
+                        session.tree.storage_bytes,
                     )
                 )
                 return True

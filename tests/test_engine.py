@@ -73,6 +73,8 @@ class EngineTests(unittest.TestCase):
             wait_until(client, lambda: client.root == 0)
             time.sleep(0.05)
             client.poll()
+            self.assertIsNotNone(client.pid)
+            self.assertEqual(client.authoritative_distribution_bytes, 36)
             self.assertEqual(len(client.tree.nodes), 1)
 
             command = client.advance((0,))
