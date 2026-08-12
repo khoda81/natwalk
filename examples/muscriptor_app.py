@@ -33,6 +33,7 @@ from muscriptor.tokenizer.notes import DRUM_PROGRAM
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from natwalk.cli import HelpFormatter, add_tui_arguments  # noqa: E402
 from natwalk.tui import run_tui  # noqa: E402
 
 VALID_CARD = 1393
@@ -246,19 +247,31 @@ class MuscriptorCursorFactory:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("audio", type=Path)
-    parser.add_argument("--model", default="medium", choices=["small", "medium", "large"])
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--chunk", type=int, default=0, help="5-second chunk index")
-    parser.add_argument("--max-tokens", type=int, default=256)
-    parser.add_argument(
-        "--tree-lines",
-        type=int,
-        help="maximum visible distribution rows; default fills the terminal",
+    parser = argparse.ArgumentParser(
+        description="Explore MuScriptor's causal transcription probability tree.",
+        formatter_class=HelpFormatter,
     )
-    parser.add_argument("--budget-nats", type=float, default=1.5)
-    parser.add_argument("--budget-step", type=float, default=0.25)
+    parser.add_argument("audio", type=Path, help="audio file to transcribe")
+
+    model = parser.add_argument_group("MuScriptor")
+    model.add_argument(
+        "--model",
+        default="medium",
+        choices=["small", "medium", "large"],
+        help="MuScriptor model size",
+    )
+    model.add_argument("--device", default="cuda", help="PyTorch inference device")
+    model.add_argument(
+        "--chunk",
+        type=int,
+        default=0,
+        help="zero-based 5-second audio chunk to explore",
+    )
+    add_tui_arguments(
+        parser,
+        max_tokens_default=256,
+        max_tokens_help=("MuScriptor streaming-cache token capacity and maximum suggestion length"),
+    )
     return parser.parse_args()
 
 
@@ -279,6 +292,7 @@ def main() -> None:
         budget_nats=args.budget_nats,
         budget_step=args.budget_step,
         lines=args.tree_lines,
+        max_tree_bytes=args.max_tree_bytes,
     )
 
 

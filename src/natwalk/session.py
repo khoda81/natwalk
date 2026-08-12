@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from .model import Cursor, rank
 from .search import Search
-from .tree import Distribution, NodeId, Tree
+from .tree import NodeId, RankedDistribution, Tree
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,12 +39,12 @@ class Session:
         self._root_checkpoint = checkpoint.cursor
         self.search.reset(self.root)
 
-    def distribution(self) -> Distribution:
-        """Return the complete distribution at the current committed root."""
+    def distribution(self) -> RankedDistribution:
+        """Return the complete authoritative distribution at the committed root."""
         return self.tree[self.root].distribution
 
-    def inspect(self, node_id: NodeId) -> Distribution:
-        """Return one already-discovered node distribution."""
+    def inspect(self, node_id: NodeId) -> RankedDistribution:
+        """Return one already-discovered authoritative node distribution."""
         return self.tree[node_id].distribution
 
     def inspect_child(self, parent_id: NodeId, rank_index: int) -> NodeId:
@@ -65,9 +65,9 @@ class Session:
         tree: Tree,
         parent_id: NodeId,
         rank_index: int,
-    ) -> Distribution:
+    ) -> RankedDistribution:
         parent_distribution = tree[parent_id].distribution
-        token = parent_distribution.tokens[rank_index]
+        token = parent_distribution.token(rank_index)
 
         self.cursor.restore(self._root_checkpoint)
         try:
@@ -85,7 +85,7 @@ class Session:
         for token in tokens:
             parent = self.root
             distribution = self.tree[parent].distribution
-            rank_index = distribution.tokens.index(token)
+            rank_index = distribution.rank(token)
             child = self.tree.child(parent, rank_index)
 
             self.cursor.observe(token)

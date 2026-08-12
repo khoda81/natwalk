@@ -15,6 +15,7 @@ existing ``ollama pull`` does not require another model download.
 from __future__ import annotations
 
 import argparse
+import math
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -25,6 +26,8 @@ from typing import cast
 import numpy as np
 from llama_cpp import Llama
 
+from natwalk.cli import HelpFormatter, add_tui_arguments
+from natwalk.tree import RankedDistribution
 from natwalk.tui import run_tui
 
 
@@ -56,11 +59,72 @@ def resolve_ollama_gguf(model: str) -> Path:
     raise RuntimeError(f"ollama show --modelfile {model!r} did not contain a FROM path")
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class _NumpyDistribution:
+    """Complete ranked distribution retained entirely in NumPy storage."""
+
+    tokens: np.ndarray
+    probabilities: np.ndarray
+
+    def __post_init__(self) -> None:
+        if self.tokens.dtype != np.dtype("uint32"):
+            raise TypeError("ranked token ids must be uint32")
+        if self.probabilities.dtype != np.dtype("float64"):
+            raise TypeError("ranked probabilities must be float64")
+        if self.tokens.ndim != 1 or self.probabilities.ndim != 1:
+            raise ValueError("ranked arrays must be one-dimensional")
+        if len(self.tokens) != len(self.probabilities):
+            raise ValueError("ranked token/probability lengths differ")
+        self.tokens.flags.writeable = False
+        self.probabilities.flags.writeable = False
+
+    def __len__(self) -> int:
+        return len(self.tokens)
+
+    @property
+    def revealed(self) -> int:
+        return len(self)
+
+    @property
+    def storage_bytes(self) -> int:
+        return int(self.tokens.nbytes + self.probabilities.nbytes)
+
+    def token(self, rank: int) -> int:
+        return int(self.tokens[rank])
+
+    def probability(self, rank: int) -> float:
+        return float(self.probabilities[rank])
+
+    def mass(self, start: int, end: int) -> float:
+        start = min(max(start, 0), len(self))
+        end = min(max(end, 0), len(self))
+        if start >= end:
+            return 0.0
+        return float(np.sum(self.probabilities[start:end], dtype=np.float64))
+
+    def rank(self, token: int) -> int:
+        matches = np.flatnonzero(self.tokens == token)
+        if not len(matches):
+            raise ValueError(f"{token!r} is not in distribution")
+        return int(matches[0])
+
+    def nats(self, rank: int) -> float:
+        probability = self.probability(rank)
+        return -math.log(probability) if probability != 0.0 else math.inf
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _NumpyDistribution):
+            return NotImplemented
+        return np.array_equal(self.tokens, other.tokens) and np.array_equal(
+            self.probabilities, other.probabilities
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class _Checkpoint:
     n_tokens: int
     last_token: int
-    probs: np.ndarray | None
+    distribution: _NumpyDistribution | None
 
 
 class LlamaCursor:
@@ -71,24 +135,24 @@ class LlamaCursor:
             raise ValueError("prompt tokenization produced no tokens")
         self.llm = llm
         self.last_token = int(prompt_tokens[-1])
-        self._probs: np.ndarray | None = None
+        self._distribution: _NumpyDistribution | None = None
         self.llm.reset()
         self.llm.eval([int(token) for token in prompt_tokens])
 
     def checkpoint(self) -> object:
-        return _Checkpoint(self.llm.n_tokens, self.last_token, self._probs)
+        return _Checkpoint(self.llm.n_tokens, self.last_token, self._distribution)
 
     def restore(self, checkpoint: object) -> None:
         state = cast(_Checkpoint, checkpoint)
         self.llm.n_tokens = state.n_tokens
         self.last_token = state.last_token
-        self._probs = state.probs
+        self._distribution = state.distribution
 
-    def predict(self) -> Sequence[float]:
+    def predict(self) -> Sequence[float] | RankedDistribution:
         if self.last_token == self.llm.token_eos():
             return ()
-        if self._probs is not None:
-            return self._probs
+        if self._distribution is not None:
+            return self._distribution
 
         logits_ptr = self.llm._ctx.get_logits()  # noqa: SLF001
         logits = np.ctypeslib.as_array(logits_ptr, shape=(self.llm.n_vocab(),)).astype(
@@ -96,15 +160,21 @@ class LlamaCursor:
             copy=True,
         )
         logits -= np.max(logits)
-        probs = np.exp(logits)
-        probs /= probs.sum()
-        self._probs = probs
-        return probs
+        probabilities = np.exp(logits)
+        probabilities /= probabilities.sum()
+
+        # Stable descending sort preserves token-id order for exact ties, matching
+        # Natwalk's dependency-free ranking semantics without Pythonizing the vocab.
+        order = np.argsort(-probabilities, kind="stable")
+        tokens = np.ascontiguousarray(order, dtype=np.uint32)
+        ranked_probabilities = np.ascontiguousarray(probabilities[order], dtype=np.float64)
+        self._distribution = _NumpyDistribution(tokens, ranked_probabilities)
+        return self._distribution
 
     def observe(self, token: int) -> None:
         self.llm.eval([int(token)])
         self.last_token = int(token)
-        self._probs = None
+        self._distribution = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,28 +235,45 @@ class TokenDisplay:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Explore a local GGUF model's next-token probability tree.",
+        formatter_class=HelpFormatter,
+    )
     parser.add_argument("prompt", help="raw text prefix to continue")
-    parser.add_argument("--model", default="ministral-3:14b", help="Ollama model name")
-    parser.add_argument("--model-path", help="GGUF path; bypasses Ollama lookup")
-    parser.add_argument("--n-ctx", type=int, default=4096)
-    parser.add_argument("--n-batch", type=int, default=512)
-    parser.add_argument(
+
+    model = parser.add_argument_group("model")
+    model.add_argument(
+        "--model",
+        default="ministral-3:14b",
+        help="Ollama model name used when --model-path is omitted",
+    )
+    model.add_argument("--model-path", help="local GGUF path; bypasses Ollama lookup")
+    model.add_argument("--n-ctx", type=int, default=4096, help="llama.cpp context size in tokens")
+    model.add_argument("--n-batch", type=int, default=512, help="llama.cpp evaluation batch size")
+    model.add_argument(
         "--n-gpu-layers",
         type=int,
         default=-1,
         help="layers to offload to GPU; -1 means all layers, 0 forces CPU",
     )
-    parser.add_argument("--threads", type=int)
-    parser.add_argument("--max-tokens", type=int, default=128)
-    parser.add_argument(
-        "--tree-lines",
+    model.add_argument(
+        "--threads",
         type=int,
-        help="maximum visible distribution rows; default fills the terminal",
+        help="CPU threads for llama.cpp; default lets llama.cpp choose",
     )
-    parser.add_argument("--budget-nats", type=float, default=1.5)
-    parser.add_argument("--budget-step", type=float, default=0.25)
-    parser.add_argument("--llama-verbose", action="store_true")
+    model.add_argument(
+        "--llama-verbose",
+        action="store_true",
+        help="enable verbose llama.cpp logging",
+    )
+
+    add_tui_arguments(
+        parser,
+        max_tokens_default=128,
+        max_tokens_help=(
+            "maximum token length of suggestions and row previews; does not cap background search"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -237,6 +324,7 @@ def main() -> None:
             budget_nats=args.budget_nats,
             budget_step=args.budget_step,
             lines=args.tree_lines,
+            max_tree_bytes=args.max_tree_bytes,
         )
     finally:
         tokenizer.close()

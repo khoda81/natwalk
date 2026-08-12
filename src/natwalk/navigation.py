@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 
 from .session import Checkpoint, Session
-from .tree import Distribution
+from .tree import RankedDistribution
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,10 +46,10 @@ class Navigation:
         return self.state.actions * math.log2(self.choices)
 
     @staticmethod
-    def _rank_at(distribution: Distribution, point: float) -> tuple[int, float]:
+    def _rank_at(distribution: RankedDistribution, point: float) -> tuple[int, float]:
         edge = 0.0
-        for rank, probability in enumerate(distribution.probabilities):
-            next_edge = edge + probability
+        for rank in range(len(distribution)):
+            next_edge = edge + distribution.probability(rank)
             if point < next_edge:
                 return rank, edge
             edge = next_edge
@@ -62,7 +62,7 @@ class Navigation:
         """Narrow one equal-width bucket and commit every newly forced token."""
         if not 0 <= bucket < self.choices:
             raise ValueError(f"bucket must be in [0, {self.choices})")
-        if not self.session.distribution().tokens:
+        if len(self.session.distribution()) == 0:
             return ()
 
         self._push_history()
@@ -76,7 +76,7 @@ class Navigation:
         def forced_tokens():
             while True:
                 distribution = self.session.distribution()
-                if not distribution.tokens:
+                if len(distribution) == 0:
                     return
 
                 left_rank, left_edge = self._rank_at(distribution, self.state.lo)
@@ -85,8 +85,8 @@ class Navigation:
                 if left_rank != right_rank:
                     return
 
-                probability = distribution.probabilities[left_rank]
-                token = distribution.tokens[left_rank]
+                probability = distribution.probability(left_rank)
+                token = distribution.token(left_rank)
                 self.state = State(
                     lo=(self.state.lo - left_edge) / probability,
                     hi=(self.state.hi - left_edge) / probability,

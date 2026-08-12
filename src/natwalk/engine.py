@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from .model import Cursor
 from .session import Checkpoint, Session
-from .sync import NodeUpdate, TreeReplica, updates
+from .sync import TreeReplica, TreeUpdate, reveal, updates
 from .tree import NodeId
 
 type CommandId = int
@@ -30,16 +30,23 @@ class Rewind:
 
 
 @dataclass(frozen=True, slots=True)
+class Reveal:
+    node: NodeId
+    start: int
+    stop: int
+
+
+@dataclass(frozen=True, slots=True)
 class Stop:
     pass
 
 
-type Command = Advance | Rewind | Stop
+type Command = Advance | Rewind | Reveal | Stop
 
 
 @dataclass(frozen=True, slots=True)
 class TreeUpdates:
-    nodes: tuple[NodeUpdate, ...]
+    nodes: tuple[TreeUpdate, ...]
     frontier: int
 
 
@@ -70,15 +77,28 @@ class EngineError(RuntimeError):
 
 
 class EngineClient:
-    """Client-side process transport plus an idempotent tree replica."""
+    """Client-side process transport plus a progressive idempotent tree replica.
 
-    def __init__(self, factory: CursorFactory) -> None:
+    ``max_tree_bytes`` is an optional soft limit on authoritative retained
+    distribution storage. Reaching it pauses autonomous search but never blocks
+    explicit causal navigation. ``None`` leaves autonomous search unlimited.
+    """
+
+    def __init__(
+        self,
+        factory: CursorFactory,
+        *,
+        max_tree_bytes: int | None = None,
+    ) -> None:
+        if max_tree_bytes is not None and max_tree_bytes <= 0:
+            raise ValueError("max_tree_bytes must be positive or None")
+
         context = mp.get_context("spawn")
         self._commands = context.Queue()
         self._events = context.Queue()
         self._process = context.Process(
             target=_run_engine,
-            args=(factory, self._commands, self._events),
+            args=(factory, self._commands, self._events, max_tree_bytes),
             name="natwalk-engine",
             daemon=True,
         )
@@ -89,6 +109,7 @@ class EngineClient:
         self._done: dict[CommandId, CommandDone] = {}
         self._next_command = 0
         self._failure: EngineFailed | None = None
+        self._reveal_targets: dict[NodeId, int] = {}
 
     def __enter__(self) -> EngineClient:
         self.start()
@@ -136,7 +157,7 @@ class EngineClient:
         self._next_command += 1
         return command_id
 
-    def send(self, command: Advance | Rewind) -> None:
+    def send(self, command: Command) -> None:
         self._raise_failure()
         self._commands.put(command)
 
@@ -149,6 +170,17 @@ class EngineClient:
         command_id = self.command_id()
         self.send(Rewind(command_id))
         return command_id
+
+    def reveal(self, node: NodeId, stop: int) -> None:
+        """Request a larger concrete ranked prefix for one replica node."""
+        distribution = self.tree[node].distribution
+        start = distribution.revealed
+        stop = min(stop, len(distribution))
+        pending = self._reveal_targets.get(node, start)
+        if stop <= max(start, pending):
+            return
+        self._reveal_targets[node] = stop
+        self.send(Reveal(node, start, stop))
 
     def poll(self) -> int:
         """Apply every currently queued engine event and return the count."""
@@ -195,6 +227,11 @@ class EngineClient:
         if isinstance(event, TreeUpdates):
             self.replica.apply_many(event.nodes)
             self.frontier = event.frontier
+            for update in event.nodes:
+                distribution = self.tree[update.node].distribution
+                target = self._reveal_targets.get(update.node)
+                if target is not None and distribution.revealed >= target:
+                    del self._reveal_targets[update.node]
         elif isinstance(event, EngineState):
             self.root = event.root
             self.rewind_depth = event.rewind_depth
@@ -213,7 +250,7 @@ class EngineClient:
             )
 
 
-def _run_engine(factory: CursorFactory, commands, events) -> None:
+def _run_engine(factory: CursorFactory, commands, events, max_tree_bytes: int | None) -> None:
     """Own one Session and service commands between synchronous search discoveries."""
     try:
         session = Session(factory())
@@ -225,7 +262,7 @@ def _run_engine(factory: CursorFactory, commands, events) -> None:
             nonlocal published
             batch = updates(session.tree, start=published)
             events.put(TreeUpdates(batch, len(session.search.frontier)))
-            published += len(batch)
+            published = len(session.tree.nodes)
 
         def publish_state() -> None:
             events.put(EngineState(session.root, len(history)))
@@ -233,6 +270,15 @@ def _run_engine(factory: CursorFactory, commands, events) -> None:
         def handle(command: Command) -> bool:
             if isinstance(command, Stop):
                 return False
+
+            if isinstance(command, Reveal):
+                events.put(
+                    TreeUpdates(
+                        (reveal(session.tree, command.node, command.start, command.stop),),
+                        len(session.search.frontier),
+                    )
+                )
+                return True
 
             previous = completed.get(command.command_id)
             if previous is not None:
@@ -258,6 +304,13 @@ def _run_engine(factory: CursorFactory, commands, events) -> None:
             events.put(CommandDone(command.command_id, node))
             return True
 
+        def can_search() -> bool:
+            if max_tree_bytes is None:
+                return True
+            # The UI replica now retains only small revealed prefixes, so this
+            # soft cap is dominated by the authoritative backend distributions.
+            return session.tree.storage_bytes < max_tree_bytes
+
         publish_tree()
         publish_state()
 
@@ -275,7 +328,7 @@ def _run_engine(factory: CursorFactory, commands, events) -> None:
             if handled:
                 continue
 
-            if session.search.frontier:
+            if session.search.frontier and can_search():
                 session.search.discover()
                 publish_tree()
                 continue
