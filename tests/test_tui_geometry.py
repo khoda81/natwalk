@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from natwalk.tree import Distribution, Tree
-from natwalk.tui import _TreeRenderer, _cell_width, _path_branch_column
+from natwalk.tui import _cell_width, _path_branch_column, _TreeRenderer
 from natwalk.view import BranchRole, View, partition_rows
 
 

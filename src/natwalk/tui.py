@@ -176,12 +176,7 @@ def _path_branch_column(tokens: tuple[int, ...], describe: DescribeToken) -> int
     junction = _BRANCH_SEPARATOR.index("┬")
     junction_offset = _cell_width(_BRANCH_SEPARATOR[:junction])
     token_width = sum(_cell_width(describe(token)) for token in tokens)
-    return (
-        connector_width
-        + token_width
-        + separator_width * (len(tokens) - 1)
-        + junction_offset
-    )
+    return connector_width + token_width + separator_width * (len(tokens) - 1) + junction_offset
 
 
 def _branch_prefixes(
@@ -190,7 +185,11 @@ def _branch_prefixes(
     rows: tuple[CompactRow, ...],
 ) -> set[tuple[int, ...]]:
     """Return concrete token prefixes that own a visible radix branch."""
-    return {tree.path_from(view.node, row.parent) for row in rows}
+    return {
+        tree.path_from(view.node, row.parent)
+        for row in rows
+        if row.branch_role is BranchRole.SIBLING
+    }
 
 
 def _row_branch_columns(
@@ -611,9 +610,7 @@ def _structure_spans(
         if not 0 <= column < width:
             raise ValueError("ancestor connector must precede child branch")
         cells[column] = "│"
-        styles[column] = _grayscale(
-            _relative_probability(connector.nats, branch_reference)
-        )
+        styles[column] = _grayscale(_relative_probability(connector.nats, branch_reference))
 
     glyph_style = _grayscale(_relative_probability(row.edge_nats, branch_reference))
     for offset, char in enumerate(branch):
@@ -724,9 +721,7 @@ class _TreeRenderer:
 
     def _layout_row(self, row: CompactRow) -> _TreeRowLayout:
         selected = (
-            not row.forest
-            and row.parent == self.view.node
-            and row.rank == self.selected_rank
+            not row.forest and row.parent == self.view.node and row.rank == self.selected_rank
         )
         ancestor_columns, branch_column = _row_branch_columns(
             self.tree,
@@ -792,9 +787,7 @@ class _TreeRenderer:
         for index, (token, style) in enumerate(zip(tokens, token_styles, strict=True)):
             if index:
                 separator_style = _grayscale(math.exp(-separator_nats[index - 1]))
-                separator = (
-                    _BRANCH_SEPARATOR if index in inline_branches else _SEQUENCE_SEPARATOR
-                )
+                separator = _BRANCH_SEPARATOR if index in inline_branches else _SEQUENCE_SEPARATOR
                 spans.append((separator, separator_style))
             spans.append((self.describe(token), style))
 
@@ -804,9 +797,7 @@ class _TreeRenderer:
                     _relative_probability(row.path_nats, self.branch_reference)
                 )
                 separator = (
-                    _BRANCH_SEPARATOR
-                    if len(tokens) in inline_branches
-                    else _SEQUENCE_SEPARATOR
+                    _BRANCH_SEPARATOR if len(tokens) in inline_branches else _SEQUENCE_SEPARATOR
                 )
                 spans.append((separator, separator_style))
             spans.append(("…", _FOREST_STYLE))
@@ -1028,14 +1019,8 @@ def _render(
         )
 
         view_base_nats = tree.path_nats(view.node, ancestor=root)
-        above_branch_nats = (
-            forest_nats(distribution, view.first_rank, start) if above else None
-        )
-        above_nats = (
-            view_base_nats + above_branch_nats
-            if above_branch_nats is not None
-            else None
-        )
+        above_branch_nats = forest_nats(distribution, view.first_rank, start) if above else None
+        above_nats = view_base_nats + above_branch_nats if above_branch_nats is not None else None
         renderer = _TreeRenderer(
             tree,
             root,

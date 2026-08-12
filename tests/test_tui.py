@@ -11,8 +11,6 @@ from natwalk.tui import (
     _PREDICTION_STYLE,
     _SUGGESTION_STYLE,
     App,
-    _TreeRenderer,
-    _TreeRowLayout,
     _cell_width,
     _clip,
     _context_spans,
@@ -25,6 +23,8 @@ from natwalk.tui import (
     _row_preview,
     _row_separator_nats,
     _tree_viewport,
+    _TreeRenderer,
+    _TreeRowLayout,
     _wrap_spans,
 )
 from natwalk.view import CompactRow, View, partition_rows
