@@ -24,327 +24,196 @@ jobs:
 
           tui_path = Path("src/natwalk/tui.py")
           tui = tui_path.read_text()
-          tui = tui.replace(
-              "_REVEAL_PAGE = 128\n_REVEAL_PREFETCH = 32\n",
-              "_REVEAL_PAGE = 128\n",
-          )
+
+          old = "_REVEAL_PAGE = 128\n_REVEAL_PREFETCH = 32\n"
+          if old not in tui:
+              raise SystemExit("reveal constants not found")
+          tui = tui.replace(old, "_REVEAL_PAGE = 128\n", 1)
 
           marker = "    return start, above, visible\n\n\ndef _wrap_spans("
-          helper = '''    return start, above, visible
-
-
-def _viewport_reveal_target(
-    tree: Tree,
-    view: View,
-    *,
-    tree_lines: int,
-) -> int:
-    """Return the concrete rank horizon needed for this viewport plus one viewport ahead."""
-    distribution = tree[view.node].distribution
-    if distribution.revealed == 0:
-        return min(len(distribution), _REVEAL_PAGE)
-
-    selected = min(view.selected_rank, distribution.revealed - 1)
-    start, above, _visible = _tree_viewport(
-        tree,
-        view,
-        selected=selected,
-        tree_lines=tree_lines,
-    )
-    row_budget = max(0, tree_lines - int(above > 0))
-    return min(len(distribution), start + 2 * row_budget)
-
-
-def _wrap_spans('''
+          helper = (
+              "    return start, above, visible\n\n\n"
+              "def _viewport_reveal_target(\n"
+              "    tree: Tree,\n"
+              "    view: View,\n"
+              "    *,\n"
+              "    tree_lines: int,\n"
+              ") -> int:\n"
+              "    \"\"\"Return the concrete rank horizon needed for this viewport plus one viewport ahead.\"\"\"\n"
+              "    distribution = tree[view.node].distribution\n"
+              "    if distribution.revealed == 0:\n"
+              "        return min(len(distribution), _REVEAL_PAGE)\n\n"
+              "    selected = min(view.selected_rank, distribution.revealed - 1)\n"
+              "    start, above, _visible = _tree_viewport(\n"
+              "        tree,\n"
+              "        view,\n"
+              "        selected=selected,\n"
+              "        tree_lines=tree_lines,\n"
+              "    )\n"
+              "    row_budget = max(0, tree_lines - int(above > 0))\n"
+              "    return min(len(distribution), start + 2 * row_budget)\n\n\n"
+              "def _wrap_spans("
+          )
           if marker not in tui:
               raise SystemExit("viewport insertion point not found")
           tui = tui.replace(marker, helper, 1)
 
-          old_render_sig = ''') -> None:
-    """Render one frame from replicated tree state without contacting the engine."""
-'''
-          new_render_sig = ''') -> int:
-    """Render one frame from replicated tree state without contacting the engine."""
-'''
-          if old_render_sig not in tui:
+          old = ") -> None:\n    \"\"\"Render one frame from replicated tree state without contacting the engine.\"\"\"\n"
+          new = ") -> int:\n    \"\"\"Render one frame from replicated tree state without contacting the engine.\"\"\"\n"
+          if old not in tui:
               raise SystemExit("render signature not found")
-          tui = tui.replace(old_render_sig, new_render_sig, 1)
+          tui = tui.replace(old, new, 1)
 
-          old_render_end = '''    frame.extend(footer)
-    _write_frame(frame)
-
-
-class App:'''
-          new_render_end = '''    frame.extend(footer)
-    _write_frame(frame)
-    return tree_lines
-
-
-class App:'''
-          if old_render_end not in tui:
+          old = "    frame.extend(footer)\n    _write_frame(frame)\n\n\nclass App:"
+          new = "    frame.extend(footer)\n    _write_frame(frame)\n    return tree_lines\n\n\nclass App:"
+          if old not in tui:
               raise SystemExit("render end not found")
-          tui = tui.replace(old_render_end, new_render_end, 1)
+          tui = tui.replace(old, new, 1)
 
-          old_lines = '''        self.budget_step = budget_step
-        self.lines = lines
-
-        self.view = View(node=self.root)
-'''
-          new_lines = '''        self.budget_step = budget_step
-        self.lines = lines
-        self._tree_lines = max(2, lines) if lines is not None else 30
-
-        self.view = View(node=self.root)
-'''
-          if old_lines not in tui:
+          old = "        self.budget_step = budget_step\n        self.lines = lines\n\n        self.view = View(node=self.root)\n"
+          new = "        self.budget_step = budget_step\n        self.lines = lines\n        self._tree_lines = max(2, lines) if lines is not None else 30\n\n        self.view = View(node=self.root)\n"
+          if old not in tui:
               raise SystemExit("App line state not found")
-          tui = tui.replace(old_lines, new_lines, 1)
+          tui = tui.replace(old, new, 1)
 
-          old_render = '''    def render(self) -> None:
-        self._refresh_suggestion()
-        cursor = self.view.node
-        _render(
-            self.tree,
-            cursor,
-            self.engine.frontier,
-            self.describe,
-            self.view,
-            title=self.title,
-            context=self.context,
-            decode_tokens=self.decode_tokens,
-            budget_nats=self.budget_nats,
-            suggestion=self.suggestion,
-            max_tokens=self.max_tokens,
-            lines=self.lines,
-            debug=self.debug,
-            rewind_depth=len(self.tree.path(cursor)),
-            engine_root=self.root,
-            pending_commands=len(self.pending),
-        )
-        self.last_render = time.monotonic()
-'''
-          new_render = '''    def render(self) -> None:
-        self._refresh_suggestion()
-        cursor = self.view.node
-        self._tree_lines = _render(
-            self.tree,
-            cursor,
-            self.engine.frontier,
-            self.describe,
-            self.view,
-            title=self.title,
-            context=self.context,
-            decode_tokens=self.decode_tokens,
-            budget_nats=self.budget_nats,
-            suggestion=self.suggestion,
-            max_tokens=self.max_tokens,
-            lines=self.lines,
-            debug=self.debug,
-            rewind_depth=len(self.tree.path(cursor)),
-            engine_root=self.root,
-            pending_commands=len(self.pending),
-        )
-        self.last_render = time.monotonic()
-'''
-          if old_render not in tui:
-              raise SystemExit("App.render block not found")
-          tui = tui.replace(old_render, new_render, 1)
+          old = (
+              "    def render(self) -> None:\n"
+              "        self._refresh_suggestion()\n"
+              "        cursor = self.view.node\n"
+              "        _render(\n"
+          )
+          new = (
+              "    def render(self) -> None:\n"
+              "        self._refresh_suggestion()\n"
+              "        cursor = self.view.node\n"
+              "        self._tree_lines = _render(\n"
+          )
+          if old not in tui:
+              raise SystemExit("App.render start not found")
+          tui = tui.replace(old, new, 1)
 
-          old_move = '''    def _move_down(self) -> bool:
-        distribution = self.tree[self.view.node].distribution
-        if distribution.revealed == 0:
-            if len(distribution):
-                self.engine.reveal(self.view.node, _REVEAL_PAGE)
-            return False
-        if self.view.selected_rank >= distribution.revealed - 1:
-            if distribution.revealed < len(distribution):
-                self.engine.reveal(self.view.node, distribution.revealed + _REVEAL_PAGE)
-            return False
-
-        self.view = move(self.tree, self.view, 1)
-        if (
-            distribution.revealed < len(distribution)
-            and self.view.selected_rank >= distribution.revealed - _REVEAL_PREFETCH
-        ):
-            self.engine.reveal(self.view.node, distribution.revealed + _REVEAL_PAGE)
-        return True
-'''
-          new_move = '''    def _prefetch_viewport(self) -> None:
-        distribution = self.tree[self.view.node].distribution
-        if distribution.revealed >= len(distribution):
-            return
-
-        target = _viewport_reveal_target(
-            self.tree,
-            self.view,
-            tree_lines=self._tree_lines,
-        )
-        if target <= distribution.revealed:
-            return
-
-        self.engine.reveal(
-            self.view.node,
-            max(target, distribution.revealed + _REVEAL_PAGE),
-        )
-
-    def _move_down(self) -> bool:
-        distribution = self.tree[self.view.node].distribution
-        if distribution.revealed == 0:
-            if len(distribution):
-                self.engine.reveal(self.view.node, _REVEAL_PAGE)
-            return False
-        if self.view.selected_rank >= distribution.revealed - 1:
-            self._prefetch_viewport()
-            return False
-
-        self.view = move(self.tree, self.view, 1)
-        self._prefetch_viewport()
-        return True
-'''
-          if old_move not in tui:
+          old = (
+              "    def _move_down(self) -> bool:\n"
+              "        distribution = self.tree[self.view.node].distribution\n"
+              "        if distribution.revealed == 0:\n"
+              "            if len(distribution):\n"
+              "                self.engine.reveal(self.view.node, _REVEAL_PAGE)\n"
+              "            return False\n"
+              "        if self.view.selected_rank >= distribution.revealed - 1:\n"
+              "            if distribution.revealed < len(distribution):\n"
+              "                self.engine.reveal(self.view.node, distribution.revealed + _REVEAL_PAGE)\n"
+              "            return False\n\n"
+              "        self.view = move(self.tree, self.view, 1)\n"
+              "        if (\n"
+              "            distribution.revealed < len(distribution)\n"
+              "            and self.view.selected_rank >= distribution.revealed - _REVEAL_PREFETCH\n"
+              "        ):\n"
+              "            self.engine.reveal(self.view.node, distribution.revealed + _REVEAL_PAGE)\n"
+              "        return True\n"
+          )
+          new = (
+              "    def _prefetch_viewport(self) -> None:\n"
+              "        distribution = self.tree[self.view.node].distribution\n"
+              "        if distribution.revealed >= len(distribution):\n"
+              "            return\n\n"
+              "        target = _viewport_reveal_target(\n"
+              "            self.tree,\n"
+              "            self.view,\n"
+              "            tree_lines=self._tree_lines,\n"
+              "        )\n"
+              "        if target <= distribution.revealed:\n"
+              "            return\n\n"
+              "        self.engine.reveal(\n"
+              "            self.view.node,\n"
+              "            max(target, distribution.revealed + _REVEAL_PAGE),\n"
+              "        )\n\n"
+              "    def _move_down(self) -> bool:\n"
+              "        distribution = self.tree[self.view.node].distribution\n"
+              "        if distribution.revealed == 0:\n"
+              "            if len(distribution):\n"
+              "                self.engine.reveal(self.view.node, _REVEAL_PAGE)\n"
+              "            return False\n"
+              "        if self.view.selected_rank >= distribution.revealed - 1:\n"
+              "            self._prefetch_viewport()\n"
+              "            return False\n\n"
+              "        self.view = move(self.tree, self.view, 1)\n"
+              "        self._prefetch_viewport()\n"
+              "        return True\n"
+          )
+          if old not in tui:
               raise SystemExit("move-down block not found")
-          tui = tui.replace(old_move, new_move, 1)
+          tui = tui.replace(old, new, 1)
           tui_path.write_text(tui)
 
           test_path = Path("tests/test_tui.py")
           tests = test_path.read_text()
-          import_line = "from natwalk.tree import Distribution, Edge, Tree\n"
-          if import_line not in tests:
+          old = "from natwalk.tree import Distribution, Edge, Tree\n"
+          if old not in tests:
               raise SystemExit("tree import not found")
-          tests = tests.replace(
-              import_line,
-              "from natwalk.sync import ReplicaDistribution\n" + import_line,
-              1,
+          tests = tests.replace(old, "from natwalk.sync import ReplicaDistribution\n" + old, 1)
+
+          anchor = "    def test_right_and_left_move_model_search_and_view_root_together(self) -> None:\n"
+          regression = (
+              "    def test_down_prefetch_depends_on_viewport_height(self) -> None:\n"
+              "        def make_app(tree_lines: int):\n"
+              "            probabilities = (0.001,) * 128\n"
+              "            distribution = ReplicaDistribution(\n"
+              "                1000,\n"
+              "                tuple(range(128)),\n"
+              "                probabilities,\n"
+              "                1.0 - math.fsum(probabilities),\n"
+              "            )\n"
+              "            tree = Tree(distribution)\n\n"
+              "            class RevealRecorder:\n"
+              "                def __init__(self) -> None:\n"
+              "                    self.tree = tree\n"
+              "                    self.calls: list[tuple[int, int]] = []\n\n"
+              "                def reveal(self, node: int, stop: int) -> None:\n"
+              "                    self.calls.append((node, stop))\n\n"
+              "            app = object.__new__(App)\n"
+              "            app.engine = RevealRecorder()\n"
+              "            app.view = View(selected_rank=31)\n"
+              "            app._tree_lines = tree_lines\n"
+              "            return app\n\n"
+              "        short = make_app(8)\n"
+              "        self.assertTrue(short._move_down())\n"
+              "        self.assertEqual(short.view.selected_rank, 32)\n"
+              "        self.assertEqual(short.engine.calls, [])\n\n"
+              "        tall = make_app(64)\n"
+              "        self.assertTrue(tall._move_down())\n"
+              "        self.assertEqual(tall.view.selected_rank, 32)\n"
+              "        self.assertEqual(tall.engine.calls, [(0, 256)])\n\n"
           )
-          anchor = '''    def test_right_and_left_move_model_search_and_view_root_together(self) -> None:
-'''
-          regression = '''    def test_down_prefetch_depends_on_viewport_height(self) -> None:
-        def make_app(tree_lines: int):
-            probabilities = (0.001,) * 128
-            distribution = ReplicaDistribution(
-                1000,
-                tuple(range(128)),
-                probabilities,
-                1.0 - math.fsum(probabilities),
-            )
-            tree = Tree(distribution)
-
-            class RevealRecorder:
-                def __init__(self) -> None:
-                    self.tree = tree
-                    self.calls: list[tuple[int, int]] = []
-
-                def reveal(self, node: int, stop: int) -> None:
-                    self.calls.append((node, stop))
-
-            app = object.__new__(App)
-            app.engine = RevealRecorder()
-            app.view = View(selected_rank=31)
-            app._tree_lines = tree_lines
-            return app
-
-        short = make_app(8)
-        self.assertTrue(short._move_down())
-        self.assertEqual(short.view.selected_rank, 32)
-        self.assertEqual(short.engine.calls, [])
-
-        tall = make_app(64)
-        self.assertTrue(tall._move_down())
-        self.assertEqual(tall.view.selected_rank, 32)
-        self.assertEqual(tall.engine.calls, [(0, 256)])
-
-'''
           if anchor not in tests:
               raise SystemExit("interactive test insertion point not found")
           tests = tests.replace(anchor, regression + anchor, 1)
           test_path.write_text(tests)
 
-          progressive = Path("tests/test_progressive_tui.py")
-          progressive.write_text('''from __future__ import annotations
-
-import time
-import unittest
-from collections.abc import Sequence
-
-from natwalk.tui import App
-from natwalk.view import View
-
-
-class WideCursor:
-    def __init__(self) -> None:
-        self.path: tuple[int, ...] = ()
-
-    def predict(self) -> Sequence[float]:
-        if self.path:
-            return ()
-        weights = tuple(range(256, 0, -1))
-        total = sum(weights)
-        return tuple(weight / total for weight in weights)
-
-    def observe(self, token: int) -> None:
-        self.path = (*self.path, token)
-
-    def checkpoint(self) -> object:
-        return self.path
-
-    def restore(self, checkpoint: object) -> None:
-        self.path = checkpoint
-
-
-def wide_cursor() -> WideCursor:
-    return WideCursor()
-
-
-def wait_for(app: App, predicate, timeout: float = 3.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        app.poll()
-        if predicate():
-            return
-        time.sleep(0.01)
-    raise AssertionError("app condition did not become true before timeout")
-
-
-class ProgressiveTuiTests(unittest.TestCase):
-    def test_tall_viewport_prefetches_next_page_before_visible_boundary(self) -> None:
-        app = App(
-            wide_cursor,
-            str,
-            title="test",
-            context="",
-            decode_tokens=None,
-            max_tokens=8,
-            budget_nats=1.0,
-            budget_step=0.25,
-            lines=64,
-        )
-        try:
-            distribution = app.tree[app.root].distribution
-            self.assertEqual(len(distribution), 256)
-            self.assertEqual(distribution.revealed, 128)
-
-            # The selected rank itself is nowhere near the revealed boundary.
-            # A tall viewport can nevertheless expose far enough below it that
-            # the next page belongs in the viewport's read-ahead horizon.
-            app.view = View(node=app.root, selected_rank=31)
-            self.assertTrue(app.handle_key("DOWN"))
-            self.assertEqual(app.view.selected_rank, 32)
-            self.assertEqual(distribution.revealed, 128)
-
-            wait_for(app, lambda: distribution.revealed == 256)
-
-            # Once the async reveal arrives, browsing crosses the old prefix
-            # boundary exactly like any other adjacent sibling rank.
-            app.view = View(node=app.root, selected_rank=127)
-            self.assertTrue(app.handle_key("DOWN"))
-            self.assertEqual(app.view.selected_rank, 128)
-        finally:
-            app.engine.terminate()
-
-
-if __name__ == "__main__":
-    unittest.main()
-''')
+          progressive_path = Path("tests/test_progressive_tui.py")
+          progressive = progressive_path.read_text()
+          replacements = (
+              (
+                  "    def test_down_prefetches_next_rank_page_before_prefix_boundary(self) -> None:\n",
+                  "    def test_tall_viewport_prefetches_next_page_before_visible_boundary(self) -> None:\n",
+              ),
+              ("            lines=8,\n", "            lines=64,\n"),
+              (
+                  "            app.view = View(node=app.root, selected_rank=95)\n"
+                  "            self.assertTrue(app.handle_key(\"DOWN\"))\n"
+                  "            self.assertEqual(app.view.selected_rank, 96)\n",
+                  "            # The selected rank itself is nowhere near the revealed boundary.\n"
+                  "            # A tall viewport nevertheless needs enough read-ahead to keep\n"
+                  "            # that boundary out of the ordinary scrolling window.\n"
+                  "            app.view = View(node=app.root, selected_rank=31)\n"
+                  "            self.assertTrue(app.handle_key(\"DOWN\"))\n"
+                  "            self.assertEqual(app.view.selected_rank, 32)\n",
+              ),
+          )
+          for old, new in replacements:
+              if old not in progressive:
+                  raise SystemExit(f"progressive test fragment not found: {old!r}")
+              progressive = progressive.replace(old, new, 1)
+          progressive_path.write_text(progressive)
           PY
 
       - uses: astral-sh/setup-uv@v6
