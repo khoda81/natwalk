@@ -28,7 +28,6 @@ def render_rows(
         view,
         rows,
         describe,
-        selected_rank=-1,
         suggestion=None,
         max_preview_tokens=0,
     )
