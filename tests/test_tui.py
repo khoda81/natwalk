@@ -319,7 +319,6 @@ class TerminalWidthTests(unittest.TestCase):
             View(),
             rows,
             str,
-            selected_rank=-1,
             suggestion=None,
             max_preview_tokens=64,
         )
@@ -332,7 +331,7 @@ class TerminalWidthTests(unittest.TestCase):
         self.assertIn(f"\033[{_PREDICTION_STYLE}m2\033[0m", colored)
         self.assertNotIn(f"\033[{_PREDICTION_STYLE}m · \033[0m", colored)
 
-    def test_selected_sibling_stays_inside_tree_viewport(self) -> None:
+    def test_viewport_starts_at_first_rank(self) -> None:
         tree = Tree(
             Distribution(
                 tokens=(0, 1, 2),
@@ -347,17 +346,16 @@ class TerminalWidthTests(unittest.TestCase):
                 probabilities=(0.02,) * 50,
             ),
         )
-        view = View(selected_rank=1)
+        view = View(first_rank=1)
 
         start, above, visible, reveal_demands = _tree_viewport(
             tree,
             view,
-            selected=1,
             tree_lines=8,
         )
 
         self.assertEqual(start, 1)
-        self.assertEqual(above, 1)
+        self.assertEqual(above, 0)
         self.assertEqual(reveal_demands, ())
         self.assertTrue(
             any(row.parent == tree.root and row.rank == 1 and not row.forest for row in visible)
@@ -386,7 +384,7 @@ class InteractiveAppTests(unittest.TestCase):
             started = time.monotonic()
             self.assertTrue(app.handle_key("DOWN"))
             self.assertLess(time.monotonic() - started, 0.1)
-            self.assertEqual(app.view.selected_rank, 1)
+            self.assertEqual(app.view.first_rank, 1)
         finally:
             app.engine.terminate()
 
