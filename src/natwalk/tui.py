@@ -25,7 +25,7 @@ from .query import (
     suggestion_tokens,
 )
 from .tree import NodeId, Tree
-from .view import BranchRole, CompactRow, View, forest_nats, move, partition_rows, row_tokens
+from .view import BranchRole, CompactRow, View, forest_nats, partition_rows, row_tokens
 
 type DescribeToken = Callable[[int], str]
 type DecodeTokens = Callable[[tuple[int, ...]], str]
@@ -35,7 +35,6 @@ _KEY_POLL_SECONDS = 0.05
 _REDRAW_SECONDS = 0.25
 _REVEAL_PAGE = 128
 _SUGGESTION_STYLE = "1;38;5;45"
-_SELECTED_STYLE = "1;38;5;220"
 _FOREST_STYLE = "2;38;5;244"
 _PREDICTION_STYLE = "38;5;241"
 _CONTINUATION_CONNECTOR = "┬ "
@@ -61,6 +60,16 @@ _ESCAPE_KEYS = {
     b"\x1bOB": "DOWN",
     b"\x1bOC": "RIGHT",
     b"\x1bOD": "LEFT",
+    b"\x1b[H": "HOME",
+    b"\x1bOH": "HOME",
+    b"\x1b[1~": "HOME",
+    b"\x1b[7~": "HOME",
+    b"\x1b[F": "END",
+    b"\x1bOF": "END",
+    b"\x1b[4~": "END",
+    b"\x1b[8~": "END",
+    b"\x1b[5~": "PAGE_UP",
+    b"\x1b[6~": "PAGE_DOWN",
     b"\x1b[Z": "BACKTAB",
 }
 
@@ -347,8 +356,7 @@ def _viewport_reveal_demands(
     return tuple(targets.items())
 
 
-def _tree_viewport(
-    tree: Tree,
+def _tree_viewport(    tree: Tree,
     view: View,
     *,
     selected: int,
@@ -539,16 +547,12 @@ def _row_display_nats(tree: Tree, root: NodeId, view: View, row: CompactRow) -> 
 def _row_token_styles(
     row: CompactRow,
     suggestion: set[Suggestion],
-    *,
-    selected: bool,
 ) -> tuple[str, ...]:
-    """Color compact-row edges from structural suggestion/UI state only."""
+    """Color compact-row edges from structural suggestion state only."""
     styles: list[str] = []
     for edge in row.edges:
         if edge in suggestion:
             style = _SUGGESTION_STYLE
-        elif selected:
-            style = _SELECTED_STYLE
         elif row.forest:
             style = _FOREST_STYLE
         else:
@@ -720,9 +724,6 @@ class _TreeRenderer:
         )
 
     def _layout_row(self, row: CompactRow) -> _TreeRowLayout:
-        selected = (
-            not row.forest and row.parent == self.view.node and row.rank == self.selected_rank
-        )
         ancestor_columns, branch_column = _row_branch_columns(
             self.tree,
             self.view,
@@ -732,17 +733,14 @@ class _TreeRenderer:
         )
         display_nats = self.view_base_nats + row.path_nats
         return _TreeRowLayout(
-            marker=(
-                "❯ " if selected else "  ",
-                _SELECTED_STYLE if selected else "",
-            ),
+            marker=("  ", ""),
             structure=_structure_spans(
                 row,
                 branch_column=branch_column,
                 ancestor_columns=ancestor_columns,
                 branch_reference=self.branch_reference,
             ),
-            label=self._label_spans(row, selected=selected),
+            label=self._label_spans(row),
             suffix=(
                 f"  {display_nats:7.3f} nat",
                 _viridis(_relative_probability(display_nats, self.nat_reference)),
@@ -752,14 +750,11 @@ class _TreeRenderer:
     def _label_spans(
         self,
         row: CompactRow,
-        *,
-        selected: bool,
     ) -> tuple[_StyledSpan, ...]:
         tokens = row_tokens(self.tree, row)
         token_styles = _row_token_styles(
             row,
             self.suggested_edges,
-            selected=selected,
         )
         separator_nats = _row_separator_nats(self.tree, row)
         preview = _row_preview(
@@ -786,47 +781,39 @@ class _TreeRenderer:
         spans: list[_StyledSpan] = []
         if tokens:
             spans.append((self.describe(tokens[0]), token_styles[0]))
-            for index, (token, style, token_nats) in enumerate(
-                zip(tokens[1:], token_styles[1:], separator_nats, strict=True),
-                start=1,
-            ):
-                separator = _BRANCH_SEPARATOR if index in inline_branches else _SEQUENCE_SEPARATOR
-                spans.extend(
-                    (
-                        (separator, _grayscale(math.exp(-token_nats))),
-                        (self.describe(token), style),
-                    )
-                )
 
-        for token, preview_nats in zip(
-            preview.tokens,
-            preview.separator_nats,
-            strict=True,
+        for index, (token, style, token_nats) in enumerate(
+            zip(tokens[1:], token_styles[1:], separator_nats, strict=True),
+            start=1,
         ):
-            spans.extend(
-                (
-                    (_SEQUENCE_SEPARATOR, _grayscale(math.exp(-preview_nats))),
-                    (self.describe(token), _PREDICTION_STYLE),
-                )
-            )
+            separator = _BRANCH_SEPARATOR if index in inline_branches else _SEQUENCE_SEPARATOR
+            separator_style = _grayscale(math.exp(-token_nats))
+
+            spans.append((separator, separator_style))
+            spans.append((self.describe(token), style))
+
+        for token, preview_nats in zip(preview.tokens, preview.separator_nats, strict=True):
+            separator_style = _grayscale(math.exp(-preview_nats))
+            token_text = self.describe(token)
+
+            spans.append((_SEQUENCE_SEPARATOR, separator_style))
+            spans.append((token_text, _PREDICTION_STYLE))
+
+        separator = _BRANCH_SEPARATOR if len(tokens) in inline_branches else _SEQUENCE_SEPARATOR
+        separator_style = _grayscale(
+            _relative_probability(row.path_nats, self.branch_reference)
+        )
 
         if preview.tokens and not preview.complete:
-            preview_nats = preview.separator_nats[-1]
-            spans.extend(
-                (
-                    (_SEQUENCE_SEPARATOR, _grayscale(math.exp(-preview_nats))),
-                    ("…", _PREDICTION_STYLE),
-                )
-            )
+            separator_style = _grayscale(math.exp(-preview.separator_nats[-1]))
+
+            spans.append((_SEQUENCE_SEPARATOR, separator_style))
+            spans.append(("…", _PREDICTION_STYLE))
+
         elif not preview.tokens and (row.forest or row.open_ended):
             if tokens:
-                separator = (
-                    _BRANCH_SEPARATOR if len(tokens) in inline_branches else _SEQUENCE_SEPARATOR
-                )
-                separator_style = _grayscale(
-                    _relative_probability(row.path_nats, self.branch_reference)
-                )
                 spans.append((separator, separator_style))
+
             spans.append(("…", _FOREST_STYLE))
 
         return tuple(spans)
@@ -859,15 +846,37 @@ def _terminal():
         return
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
-    sys.stdout.write("\033[?1049h\033[H\033[?25l")
+    sys.stdout.write("\033[?1049h\033[H\033[?25l\033[?1000h\033[?1006h")
     sys.stdout.flush()
     tty.setcbreak(fd)
     try:
         yield
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        sys.stdout.write("\033[?25h\033[?1049l")
+        sys.stdout.write("\033[?1006l\033[?1000l\033[?25h\033[?1049l")
         sys.stdout.flush()
+
+
+def _decode_escape(sequence: bytes) -> str | None:
+    """Decode one complete terminal escape sequence."""
+    key = _ESCAPE_KEYS.get(sequence)
+    if key is not None:
+        return key
+
+    if sequence.startswith(b"\x1b[<") and sequence[-1:] in {b"M", b"m"}:
+        try:
+            button = int(sequence[3:].split(b";", 1)[0])
+        except ValueError:
+            return "ESC"
+
+        button &= ~0x1C
+        if button == 64:
+            return "UP"
+        if button == 65:
+            return "DOWN"
+        return "MOUSE"
+
+    return None
 
 
 def _read_key(timeout: float = _KEY_POLL_SECONDS) -> str | None:
@@ -888,8 +897,8 @@ def _read_key(timeout: float = _KEY_POLL_SECONDS) -> str | None:
 
     sequence = bytearray(first)
     deadline = time.monotonic() + 0.05
-    while len(sequence) < 16:
-        key = _ESCAPE_KEYS.get(bytes(sequence))
+    while len(sequence) < 64:
+        key = _decode_escape(bytes(sequence))
         if key is not None:
             return key
 
@@ -903,10 +912,13 @@ def _read_key(timeout: float = _KEY_POLL_SECONDS) -> str | None:
         if not chunk:
             break
         sequence.extend(chunk)
+
         if sequence[-1] == ord("~"):
             break
+        if sequence.startswith(b"\x1b[<") and sequence[-1:] in {b"M", b"m"}:
+            break
 
-    return _ESCAPE_KEYS.get(bytes(sequence), "ESC")
+    return _decode_escape(bytes(sequence)) or "ESC"
 
 
 def _read_keys(timeout: float = _KEY_POLL_SECONDS) -> tuple[str, ...]:
@@ -980,7 +992,7 @@ def _render(
         frame.append(
             _line(
                 f"cursor {root}  ·  engine {confirmed_root}"
-                f"  ·  rank {view.first_rank}/{view.selected_rank}"
+                f"  ·  rank {view.first_rank}"
                 f"  ·  queued {pending_commands}  ·  rewind {rewind_depth}",
                 columns,
             )
@@ -1003,11 +1015,15 @@ def _render(
     footer = (
         _line(rule, columns),
         _line(
-            "↑↓ rank  ·  ←/Backspace parent  ·  → child  ·  Space accept",
+            "↑↓/wheel scroll  ·  ←/Backspace parent  ·  → child  ·  Space accept",
             columns,
         ),
         _line(
-            "Tab/Shift-Tab suggestion  ·  [ ] suggestion limit  ·  d debug  ·  q quit",
+            "Home/End top/bottom  ·  PgUp/PgDn page  ·  Tab/Shift-Tab suggestion",
+            columns,
+        ),
+        _line(
+            "[ ] suggestion limit  ·  d debug  ·  q quit",
             columns,
         ),
     )
@@ -1022,7 +1038,7 @@ def _render(
     elif distribution.revealed == 0:
         frame.append(_line("  … unrevealed", columns))
     else:
-        selected = min(view.selected_rank, distribution.revealed - 1)
+        selected = min(view.first_rank, distribution.revealed - 1)
         start, above, visible, reveal_demands = _tree_viewport(
             tree,
             view,
@@ -1245,42 +1261,89 @@ class App:
             )
             return True
         if key == "UP":
-            self.view = move(self.tree, self.view, -1)
-            return True
+            return self._scroll(-1)
         if key == "DOWN":
-            return self._move_down()
+            return self._scroll(1)
+        if key == "HOME":
+            return self._scroll_to(0)
+        if key == "END":
+            return self._scroll_to_end()
+        if key == "PAGE_UP":
+            return self._scroll_page(-1)
+        if key == "PAGE_DOWN":
+            return self._scroll_page(1)
         if key == "LEFT" or key in ("\x7f", "\b"):
             return self._rewind()
         if key in (" ", "\r", "\n"):
             return self._accept()
         if key == "RIGHT":
-            return self._advance_selected()
+            return self._advance_visible()
         return False
 
-    def _move_down(self) -> bool:
+    def _scroll_to(self, rank: int) -> bool:
         distribution = self.tree[self.view.node].distribution
         if distribution.revealed == 0:
             if len(distribution):
                 self.engine.reveal(self.view.node, _REVEAL_PAGE)
             return False
-        if self.view.selected_rank >= distribution.revealed - 1:
+
+        rank = min(max(0, rank), distribution.revealed - 1)
+        if rank == self.view.first_rank:
+            return False
+
+        self.view = View(
+            node=self.view.node,
+            first_rank=rank,
+            selected_rank=rank,
+        )
+        return True
+
+    def _scroll(self, delta: int) -> bool:
+        distribution = self.tree[self.view.node].distribution
+        if delta > 0 and self.view.first_rank >= distribution.revealed - 1:
             if distribution.revealed < len(distribution):
                 self.engine.reveal(self.view.node, distribution.revealed + _REVEAL_PAGE)
             return False
+        return self._scroll_to(self.view.first_rank + delta)
 
-        self.view = move(self.tree, self.view, 1)
-        return True
+    def _scroll_to_end(self) -> bool:
+        distribution = self.tree[self.view.node].distribution
+        if distribution.revealed == 0:
+            if len(distribution):
+                self.engine.reveal(self.view.node, _REVEAL_PAGE)
+            return False
+        return self._scroll_to(distribution.revealed - 1)
+
+    def _scroll_page(self, direction: int) -> bool:
+        _, terminal_rows = _dimensions()
+        page = self.lines if self.lines is not None else max(1, terminal_rows // 2)
+        target = self.view.first_rank + direction * max(1, page)
+
+        distribution = self.tree[self.view.node].distribution
+        if direction > 0 and target >= distribution.revealed and distribution.revealed < len(distribution):
+            stop = min(
+                len(distribution),
+                max(distribution.revealed + _REVEAL_PAGE, target + 1),
+            )
+            self.engine.reveal(self.view.node, stop)
+
+        return self._scroll_to(target)
 
     def _rewind(self) -> bool:
         if self.navigation_blocked:
             return False
-        parent = self.tree[self.view.node].parent
-        if parent is None:
+
+        node = self.tree[self.view.node]
+        if node.parent is None:
             return False
 
         command_id = self.engine.rewind()
-        self._pending_known.append((command_id, parent))
-        self.view = View(node=parent)
+        self._pending_known.append((command_id, node.parent))
+        self.view = View(
+            node=node.parent,
+            first_rank=node.rank,
+            selected_rank=node.rank,
+        )
         self._refresh_suggestion()
         return True
 
@@ -1294,16 +1357,16 @@ class App:
         self._pending_unknown = self.engine.advance(tokens)
         return False
 
-    def _advance_selected(self) -> bool:
+    def _advance_visible(self) -> bool:
         if self.navigation_blocked:
             return False
         distribution = self.tree[self.view.node].distribution
         if distribution.revealed == 0:
             return False
 
-        selected = min(self.view.selected_rank, distribution.revealed - 1)
-        token = distribution.token(selected)
-        child = self.tree.child(self.view.node, selected)
+        rank = min(self.view.first_rank, distribution.revealed - 1)
+        token = distribution.token(rank)
+        child = self.tree.child(self.view.node, rank)
         command_id = self.engine.advance((token,))
         if child is None:
             self._pending_unknown = command_id
