@@ -123,33 +123,41 @@ class _NumpyDistribution:
 @dataclass(frozen=True, slots=True)
 class _Checkpoint:
     n_tokens: int
-    last_token: int
+    terminal: bool
     distribution: _NumpyDistribution | None
 
 
 class LlamaCursor:
     """Checkpoint-only complete-distribution cursor over one llama.cpp context."""
 
-    def __init__(self, llm: Llama, prompt_tokens: Sequence[int]) -> None:
+    def __init__(
+        self,
+        llm: Llama,
+        prompt_tokens: Sequence[int],
+        *,
+        terminal: bool | None = None,
+    ) -> None:
         if not prompt_tokens:
-            raise ValueError("prompt tokenization produced no tokens")
+            raise ValueError("llama.cpp requires at least one evaluated start token")
         self.llm = llm
-        self.last_token = int(prompt_tokens[-1])
+        self.terminal = (
+            int(prompt_tokens[-1]) == self.llm.token_eos() if terminal is None else terminal
+        )
         self._distribution: _NumpyDistribution | None = None
         self.llm.reset()
         self.llm.eval([int(token) for token in prompt_tokens])
 
     def checkpoint(self) -> object:
-        return _Checkpoint(self.llm.n_tokens, self.last_token, self._distribution)
+        return _Checkpoint(self.llm.n_tokens, self.terminal, self._distribution)
 
     def restore(self, checkpoint: object) -> None:
         state = cast(_Checkpoint, checkpoint)
         self.llm.n_tokens = state.n_tokens
-        self.last_token = state.last_token
+        self.terminal = state.terminal
         self._distribution = state.distribution
 
     def predict(self) -> Sequence[float] | RankedDistribution:
-        if self.last_token == self.llm.token_eos():
+        if self.terminal:
             return ()
         if self._distribution is not None:
             return self._distribution
@@ -173,7 +181,7 @@ class LlamaCursor:
 
     def observe(self, token: int) -> None:
         self.llm.eval([int(token)])
-        self.last_token = int(token)
+        self.terminal = int(token) == self.llm.token_eos()
         self._distribution = None
 
 
@@ -183,6 +191,7 @@ class LlamaCursorFactory:
 
     model_path: str
     prompt_tokens: tuple[int, ...]
+    initial_terminal: bool
     n_ctx: int
     n_batch: int
     n_gpu_layers: int
@@ -201,7 +210,29 @@ class LlamaCursorFactory:
         if self.threads is not None:
             kwargs["n_threads"] = self.threads
             kwargs["n_threads_batch"] = self.threads
-        return LlamaCursor(Llama(**kwargs), self.prompt_tokens)
+        return LlamaCursor(
+            Llama(**kwargs),
+            self.prompt_tokens,
+            terminal=self.initial_terminal,
+        )
+
+
+def _tokenize_prompt(tokenizer: Llama, prompt: str) -> tuple[tuple[int, ...], bool]:
+    """Return executable prompt tokens and whether the user prompt is terminal."""
+    tokens = tuple(tokenizer.tokenize(prompt.encode("utf-8"), add_bos=True, special=True))
+    if tokens:
+        return tokens, bool(prompt) and tokens[-1] == tokenizer.token_eos()
+    if prompt:
+        raise ValueError("prompt tokenization produced no tokens")
+
+    bos = tokenizer.token_bos()
+    if bos < 0:
+        raise ValueError(
+            "empty prompt produced no tokens and this model defines no BOS token for bootstrapping"
+        )
+    # This token establishes backend execution state only. Even if BOS and EOS
+    # share an id, an empty user prompt is not semantically terminal.
+    return (int(bos),), False
 
 
 class TokenDisplay:
@@ -291,9 +322,7 @@ def main() -> None:
         verbose=False,
     )
     try:
-        prompt_tokens = tuple(
-            tokenizer.tokenize(args.prompt.encode("utf-8"), add_bos=True, special=True)
-        )
+        prompt_tokens, initial_terminal = _tokenize_prompt(tokenizer, args.prompt)
         if len(prompt_tokens) >= args.n_ctx:
             raise ValueError(
                 f"prompt uses {len(prompt_tokens)} tokens but --n-ctx is only {args.n_ctx}"
@@ -308,6 +337,7 @@ def main() -> None:
         factory = LlamaCursorFactory(
             model_path=str(model_path),
             prompt_tokens=prompt_tokens,
+            initial_terminal=initial_terminal,
             n_ctx=args.n_ctx,
             n_batch=args.n_batch,
             n_gpu_layers=args.n_gpu_layers,
