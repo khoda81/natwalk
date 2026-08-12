@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from enum import Enum, auto
 from itertools import islice
 
 from .tree import Edge, NodeId, RankedDistribution, Tree
@@ -34,6 +35,13 @@ class Row:
     expanded: bool
 
 
+class BranchRole(Enum):
+    """How one physical radix row leaves its branch point."""
+
+    CONTINUATION = auto()
+    SIBLING = auto()
+
+
 @dataclass(frozen=True, slots=True)
 class AncestorConnector:
     """One visible radix ancestor connector and its exact aggregate surprisal."""
@@ -48,10 +56,12 @@ class CompactRow:
 
     ``edges`` is the structural radix suffix not already factored by earlier
     rows. Token ids and edge costs are derived from those edges and the tree.
-    ``path_nats`` is the exact event surprisal from the view
-    root. ``edge_nats`` is the aggregate surprisal of the displayed branch from
-    the view root, used only to shade its connector. ``ancestors`` keeps each
-    visible ancestor connector's shape and aggregate surprisal as one value.
+    ``path_nats`` is the exact event surprisal from the view root. ``edge_nats``
+    is the aggregate surprisal of the displayed branch from the view root, used
+    only to shade its connector. ``ancestors`` keeps each visible ancestor
+    connector's shape and aggregate surprisal as one value. ``branch_role``
+    distinguishes the partition's continuing spine from an ordinary sibling;
+    screen coordinates never determine that semantic role.
     """
 
     parent: NodeId
@@ -66,6 +76,7 @@ class CompactRow:
     open_ended: bool = False
     forest_count: int = 0
     forest_start: int = 0
+    branch_role: BranchRole = BranchRole.SIBLING
 
     @property
     def ancestor_last(self) -> tuple[bool, ...]:
@@ -278,7 +289,12 @@ def partition_rows(
         events[index : index + 1] = split
 
     events.sort(key=_partition_order)
-    return _partition_layout_rows(tree, root, events)
+    return _partition_layout_rows(
+        tree,
+        root,
+        events,
+        root_continuation=start == view.first_rank,
+    )
 
 
 def _partition_branch(
@@ -463,6 +479,8 @@ def _partition_layout_rows(
     tree: Tree,
     root: NodeId,
     events: list[_PartitionEvent],
+    *,
+    root_continuation: bool,
 ) -> tuple[CompactRow, ...]:
     children = _partition_children(events)
     edge_nats = _partition_edge_nats(events)
@@ -491,6 +509,11 @@ def _partition_layout_rows(
         branch_child = _partition_child_key(event, common)
         branch_nats = edge_nats[(branch_prefix, branch_child)]
         is_last = branch_child == children[branch_prefix][-1]
+        branch_role = (
+            BranchRole.CONTINUATION
+            if previous is None and root_continuation
+            else BranchRole.SIBLING
+        )
 
         if event.ranks:
             root_rank = event.ranks[0]
@@ -529,6 +552,7 @@ def _partition_layout_rows(
                 open_ended=open_ended,
                 forest_count=forest_count,
                 forest_start=forest_start,
+                branch_role=branch_role,
             )
         )
         previous = event
