@@ -414,7 +414,7 @@ class TerminalWidthTests(unittest.TestCase):
         )
         view = View(selected_rank=1)
 
-        start, above, visible = _tree_viewport(
+        start, above, visible, reveal_demands = _tree_viewport(
             tree,
             view,
             selected=1,
@@ -423,6 +423,7 @@ class TerminalWidthTests(unittest.TestCase):
 
         self.assertEqual(start, 1)
         self.assertEqual(above, 1)
+        self.assertEqual(reveal_demands, ())
         self.assertTrue(
             any(row.parent == tree.root and row.rank == 1 and not row.forest for row in visible)
         )
