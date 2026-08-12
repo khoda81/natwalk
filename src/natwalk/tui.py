@@ -161,8 +161,10 @@ def _path_branch_column(tokens: tuple[int, ...], describe: DescribeToken) -> int
     """Column where a branch after ``tokens`` meets its collapsed token edge."""
     if not tokens:
         return 0
-    token_width = sum(_cell_width(describe(token)) for token in tokens)
-    return 4 + token_width + 3 * (len(tokens) - 1)
+    # Measure the rendered geometry instead of duplicating its widths as arithmetic.
+    # `` · `` and `` ┬ `` have the same cell width, and ├─/└─ share one width too.
+    prefix = "├─" + " · ".join(describe(token) for token in tokens) + " "
+    return _cell_width(prefix)
 
 
 def _branch_prefixes(
@@ -555,8 +557,7 @@ def _structure_prefix(
     if len(ancestor_branch_nats) != len(row.ancestor_last):
         raise ValueError("ancestor branch-nat count must match tree depth")
 
-    root_branch = branch_column == 0
-    branch = ("└─ " if row.is_last else "├─ ") if root_branch else ("└─" if row.is_last else "├─")
+    branch = "└─" if row.is_last else "├─"
     width = branch_column + _cell_width(branch)
     cells = [" "] * width
     styles = [""] * width
@@ -619,6 +620,34 @@ def _format_tree_row(
 
     marker = "❯ " if selected else "  "
     suffix = f"  {display_nats:7.3f} nat"
+    marker_width = _cell_width(marker)
+    suffix_width = _cell_width(suffix)
+    branch_width = _cell_width("└─" if row.is_last else "├─")
+    structure_width = branch_column + branch_width
+    nat_style = _viridis(_relative_probability(display_nats, nat_reference))
+
+    # Tree coordinates are global geometry. Never remap one overflowing row to a
+    # different indentation system: that makes the same radix prefix move between
+    # physical columns. Instead, explicitly report that the real branch is to the
+    # right of the drawable viewport.
+    if marker_width + structure_width + suffix_width > columns:
+        notice = "… branch off-screen →"
+        notice_room = columns - marker_width - suffix_width
+        if notice_room > 0:
+            return (
+                _paint(marker, _SELECTED_STYLE if selected else "", color=color)
+                + _fit_spans(((notice, _FOREST_STYLE),), notice_room, color=color)
+                + _paint(suffix, nat_style, color=color)
+            )
+        return _fit_spans(
+            (
+                (marker, _SELECTED_STYLE if selected else ""),
+                (notice, _FOREST_STYLE),
+            ),
+            columns,
+            color=color,
+        )
+
     structure, structure_width = _structure_prefix(
         row,
         branch_column=branch_column,
@@ -669,25 +698,8 @@ def _format_tree_row(
         label_spans.append((" · ", separator_style))
         label_spans.append(("…", _PREDICTION_STYLE))
 
-    marker_width = _cell_width(marker)
-    suffix_width = _cell_width(suffix)
     room = max(0, columns - marker_width - structure_width - suffix_width)
-    if room == 0 and marker_width + structure_width + suffix_width > columns:
-        fallback_ancestor_columns = tuple(3 * index for index in range(len(row.ancestor_last)))
-        fallback_branch_column = 3 * len(row.ancestor_last)
-        structure, structure_width = _structure_prefix(
-            row,
-            branch_column=fallback_branch_column,
-            ancestor_columns=fallback_ancestor_columns,
-            ancestor_branch_nats=ancestor_branch_nats,
-            branch_nats=branch_nats,
-            branch_reference=branch_reference,
-            color=color,
-        )
-        room = max(0, columns - marker_width - structure_width - suffix_width)
-
     label = _fit_spans(tuple(label_spans), room, color=color)
-    nat_style = _viridis(_relative_probability(display_nats, nat_reference))
     return (
         _paint(marker, _SELECTED_STYLE if selected else "", color=color)
         + structure
