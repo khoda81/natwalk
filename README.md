@@ -137,6 +137,18 @@ uv run --with-editable . examples/llm_app.py \
   --model ministral-3:14b
 ```
 
+### Hugging Face Transformers
+
+`examples/hf_app.py` adapts standard PyTorch causal language models through `transformers` without adding either Transformers or PyTorch to Natwalk's core dependencies:
+
+```bash
+uv run --with-editable . examples/hf_app.py \
+  "The most interesting consequence of information theory is" \
+  --model Qwen/Qwen3-0.6B
+```
+
+The model id is the only model-specific input. `--device`, `--dtype`, `--tokenizer`, and `--context-length` control execution without changing Natwalk code. The adapter keeps checkpoints as lightweight token snapshots and reconstructs each requested causal state with an ordinary full-context forward, so it does not depend on model-specific KV-cache snapshot APIs.
+
 ### MuScriptor
 
 `examples/muscriptor_app.py` adapts MuScriptor's causal music-transcription distribution to the same Natwalk cursor contract:

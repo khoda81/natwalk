@@ -14,17 +14,27 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import psutil
 from llama_cpp import Llama
-from llm_app import LlamaCursorFactory, _tokenize_prompt, resolve_ollama_gguf
 
 from natwalk.cli import HelpFormatter
 from natwalk.engine import EngineClient
 
 _MIB = 1024 * 1024
+
+
+def _load_llm_app():
+    """Load the demo adapter and keep it importable by spawned engine processes."""
+    examples = str(Path(__file__).resolve().parents[1] / "examples")
+    if examples not in sys.path:
+        sys.path.insert(0, examples)
+    import llm_app
+
+    return llm_app
 
 
 def _gpu_process_mib(pid: int) -> int | None:
@@ -109,8 +119,11 @@ def main() -> None:
     if args.interval <= 0:
         raise ValueError("--interval must be positive")
 
+    llm_app = _load_llm_app()
     model_path = (
-        Path(args.model_path).expanduser() if args.model_path else resolve_ollama_gguf(args.model)
+        Path(args.model_path).expanduser()
+        if args.model_path
+        else llm_app.resolve_ollama_gguf(args.model)
     )
     tokenizer = Llama(
         model_path=str(model_path),
@@ -119,11 +132,11 @@ def main() -> None:
         verbose=False,
     )
     try:
-        prompt_tokens, initial_terminal = _tokenize_prompt(tokenizer, args.prompt)
+        prompt_tokens, initial_terminal = llm_app._tokenize_prompt(tokenizer, args.prompt)
     finally:
         tokenizer.close()
 
-    factory = LlamaCursorFactory(
+    factory = llm_app.LlamaCursorFactory(
         model_path=str(model_path),
         prompt_tokens=prompt_tokens,
         initial_terminal=initial_terminal,
