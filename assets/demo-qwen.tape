@@ -1,4 +1,4 @@
-Output demo-qwen.gif
+Output assets/demo-qwen.gif
 
 Require uv
 
@@ -12,21 +12,19 @@ Set TypingSpeed 1ms
 
 Hide
 
-Type "MODEL=$HOME/.cache/huggingface/hub/models--Qwen--Qwen3-4B-GGUF/snapshots/bc640142c66e1fdd12af0bd68f40445458f3869b/Qwen3-4B-Q6_K.gguf"
+Type "MODEL=${NATWALK_QWEN_MODEL:-$HOME/.cache/huggingface/hub/models--Qwen--Qwen3-4B-GGUF/snapshots/bc640142c66e1fdd12af0bd68f40445458f3869b/Qwen3-4B-Q6_K.gguf}"
 Enter
 
 Type "uv run --with-editable . examples/llm_app.py 'The most interesting consequence of information theory is' --model-path $MODEL"
 Enter
 
-# Don't guess how long model loading takes
+# Don't guess how long model loading takes.
+# This appears only once Natwalk owns the fullscreen terminal.
 
-# This appears only once Natwalk owns the fullscreen terminal
+Wait+Screen /suggestion/
 
-Wait+Screen /budget/
-
-# Also let background search fill in a nice tree
-
-# Hidden time contributes nothing to the GIF
+# Also let background search fill in a nice tree.
+# Hidden time contributes nothing to the GIF.
 
 Sleep 4s
 

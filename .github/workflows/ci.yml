@@ -8,25 +8,88 @@ permissions:
   contents: read
 
 jobs:
-  core:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-
-      - name: Sync
-        run: uv sync --locked
-
-      - name: Lint
+      - name: Ruff lint
         run: uvx ruff check .
 
-      - name: Format
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Ruff format
         run: uvx ruff format --check .
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Sync
+        run: uv sync --locked
       - name: Test
         run: uv run python -m unittest discover -s tests -v
 
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Sync
+        run: uv sync --locked
       - name: Build
         run: uv build
+
+  demo-staleness:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Warn when the Qwen README demo may be stale
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          relevant=false
+          gif_changed=false
+
+          while IFS= read -r path; do
+            case "$path" in
+              assets/demo-qwen.gif)
+                gif_changed=true
+                ;;
+              assets/demo-qwen.tape|examples/llm_app.py|src/natwalk/*)
+                relevant=true
+                ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          if [[ "$relevant" == true && "$gif_changed" != true ]]; then
+            echo "::warning file=assets/demo-qwen.gif::Demo-relevant code changed without refreshing the Qwen README GIF. If the visible TUI changed, run: python scripts/update_demo_qwen.py"
+            {
+              echo "### Qwen README demo may be stale"
+              echo
+              echo "This PR changes code used by the Qwen demo but does not update \`assets/demo-qwen.gif\`."
+              echo "If the visible demo changed, regenerate it locally with:"
+              echo
+              echo '```bash'
+              echo "python scripts/update_demo_qwen.py"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

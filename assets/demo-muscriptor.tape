@@ -1,4 +1,4 @@
-Output demo-muscriptor.gif
+Output assets/demo-muscriptor.gif
 
 Require uv
 
@@ -13,7 +13,7 @@ Hide
 Type "uv run --with-editable . examples/muscriptor_app.py '../muscriptor/samples/Laura Marling - What He Wrote.mp3' --model medium --device cuda --chunk 0"
 Enter
 
-Wait+Screen /budget/
+Wait+Screen /suggestion/
 
 # Give search some hidden time to populate the tree.
 Sleep 4s
