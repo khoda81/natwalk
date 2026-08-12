@@ -12,7 +12,7 @@ Set TypingSpeed 1ms
 
 Hide
 
-Type "MODEL=$HOME/.cache/huggingface/hub/models--Qwen--Qwen3-4B-GGUF/snapshots/bc640142c66e1fdd12af0bd68f40445458f3869b/Qwen3-4B-Q6_K.gguf"
+Type "MODEL=${NATWALK_QWEN_MODEL:-$HOME/.cache/huggingface/hub/models--Qwen--Qwen3-4B-GGUF/snapshots/bc640142c66e1fdd12af0bd68f40445458f3869b/Qwen3-4B-Q6_K.gguf}"
 Enter
 
 Type "uv run --with-editable . examples/llm_app.py 'The most interesting consequence of information theory is' --model-path $MODEL"
