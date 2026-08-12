@@ -153,21 +153,9 @@ def _minimum_finite(values) -> float:
 
 def _ancestor_branch_nats(
     rows: tuple[CompactRow, ...],
-    branch_nats: list[float],
 ) -> tuple[tuple[float, ...], ...]:
     """Return exact radix-ancestor weights without requiring internal rows."""
-    if len(rows) != len(branch_nats):
-        raise ValueError("row and branch-nat counts must match")
-
-    result: list[tuple[float, ...]] = []
-    for row, current_nats in zip(rows, branch_nats, strict=True):
-        if row.ancestor_nats:
-            if len(row.ancestor_nats) != len(row.ancestor_last):
-                raise ValueError("ancestor branch-nat count must match tree depth")
-            result.append(row.ancestor_nats)
-        else:
-            result.append((current_nats,) * len(row.ancestor_last))
-    return tuple(result)
+    return tuple(row.ancestor_nats for row in rows)
 
 
 def _path_branch_column(tokens: tuple[int, ...], describe: DescribeToken) -> int:
@@ -859,7 +847,7 @@ def _render(
         )
         row_display_nats = [_row_display_nats(tree, root, view, row) for row in visible]
         row_branch_nats = [row.edge_nats for row in visible]
-        row_ancestor_branch_nats = _ancestor_branch_nats(visible, row_branch_nats)
+        row_ancestor_branch_nats = _ancestor_branch_nats(visible)
         visible_branch_prefixes = _branch_prefixes(tree, view, visible)
 
         nat_reference = _minimum_finite(
