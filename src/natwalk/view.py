@@ -292,7 +292,7 @@ def partition_rows(
         tree,
         root,
         events,
-        root_continuation=start == view.first_rank,
+        root_continuation=start == 0,
     )
 
 
