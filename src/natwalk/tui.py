@@ -784,38 +784,52 @@ class _TreeRenderer:
             raise AssertionError("preview costs must follow preview tokens")
 
         spans: list[_StyledSpan] = []
-        for index, (token, style) in enumerate(zip(tokens, token_styles, strict=True)):
-            if index:
-                separator_style = _grayscale(math.exp(-separator_nats[index - 1]))
-                separator = _BRANCH_SEPARATOR if index in inline_branches else _SEQUENCE_SEPARATOR
-                spans.append((separator, separator_style))
-            spans.append((self.describe(token), style))
-
-        if row.forest or (row.open_ended and not preview.tokens):
-            if spans:
-                separator_style = _grayscale(
-                    _relative_probability(row.path_nats, self.branch_reference)
-                )
+        if tokens:
+            spans.append((self.describe(tokens[0]), token_styles[0]))
+            for index, (token, style, token_nats) in enumerate(
+                zip(tokens[1:], token_styles[1:], separator_nats, strict=True),
+                start=1,
+            ):
                 separator = (
-                    _BRANCH_SEPARATOR if len(tokens) in inline_branches else _SEQUENCE_SEPARATOR
+                    _BRANCH_SEPARATOR if index in inline_branches else _SEQUENCE_SEPARATOR
                 )
-                spans.append((separator, separator_style))
-            spans.append(("…", _FOREST_STYLE))
+                spans.extend(
+                    (
+                        (separator, _grayscale(math.exp(-token_nats))),
+                        (self.describe(token), style),
+                    )
+                )
 
         for token, preview_nats in zip(
             preview.tokens,
             preview.separator_nats,
             strict=True,
         ):
-            if spans:
-                separator_style = _grayscale(math.exp(-preview_nats))
-                spans.append((_SEQUENCE_SEPARATOR, separator_style))
-            spans.append((self.describe(token), _PREDICTION_STYLE))
+            spans.extend(
+                (
+                    (_SEQUENCE_SEPARATOR, _grayscale(math.exp(-preview_nats))),
+                    (self.describe(token), _PREDICTION_STYLE),
+                )
+            )
 
         if preview.tokens and not preview.complete:
-            separator_style = _grayscale(math.exp(-preview.separator_nats[-1]))
-            spans.append((_SEQUENCE_SEPARATOR, separator_style))
-            spans.append(("…", _PREDICTION_STYLE))
+            preview_nats = preview.separator_nats[-1]
+            spans.extend(
+                (
+                    (_SEQUENCE_SEPARATOR, _grayscale(math.exp(-preview_nats))),
+                    ("…", _PREDICTION_STYLE),
+                )
+            )
+        elif not preview.tokens and (row.forest or row.open_ended):
+            if tokens:
+                separator = (
+                    _BRANCH_SEPARATOR if len(tokens) in inline_branches else _SEQUENCE_SEPARATOR
+                )
+                separator_style = _grayscale(
+                    _relative_probability(row.path_nats, self.branch_reference)
+                )
+                spans.append((separator, separator_style))
+            spans.append(("…", _FOREST_STYLE))
 
         return tuple(spans)
 
