@@ -1,4 +1,4 @@
-Output demo-qwen.gif
+Output assets/demo-qwen.gif
 
 Require uv
 
@@ -18,15 +18,13 @@ Enter
 Type "uv run --with-editable . examples/llm_app.py 'The most interesting consequence of information theory is' --model-path $MODEL"
 Enter
 
-# Don't guess how long model loading takes
+# Don't guess how long model loading takes.
+# This appears only once Natwalk owns the fullscreen terminal.
 
-# This appears only once Natwalk owns the fullscreen terminal
+Wait+Screen /suggestion/
 
-Wait+Screen /budget/
-
-# Also let background search fill in a nice tree
-
-# Hidden time contributes nothing to the GIF
+# Also let background search fill in a nice tree.
+# Hidden time contributes nothing to the GIF.
 
 Sleep 4s
 
