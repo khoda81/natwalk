@@ -24,13 +24,15 @@ class FrameOutputTests(unittest.TestCase):
         with patch("natwalk.tui.sys.stdout", stdout):
             _write_frame(frame)
 
-        prefix = "\033[2J\033[H"
-        self.assertEqual(stdout.getvalue(), prefix + "row 1\nrow 2\nrow 3")
+        prefix = "\033[H"
+        output = stdout.getvalue()
         self.assertEqual(
-            stdout.getvalue()[len(prefix) :].count("\n"),
-            len(frame) - 1,
+            output,
+            prefix + "row 1\033[K\nrow 2\033[K\nrow 3\033[J",
         )
-        self.assertFalse(stdout.getvalue().endswith("\n"))
+        self.assertNotIn("\033[2J", output)
+        self.assertEqual(output.count("\n"), len(frame) - 1)
+        self.assertFalse(output.endswith("\n"))
 
     def test_non_interactive_frame_remains_line_terminated(self) -> None:
         stdout = _Stdout(tty=False)

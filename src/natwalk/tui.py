@@ -827,11 +827,12 @@ def _read_keys(timeout: float = _KEY_POLL_SECONDS) -> tuple[str, ...]:
 
 
 def _write_frame(frame: list[str]) -> None:
-    """Write one complete frame without scrolling past the terminal bottom."""
-    interactive = sys.stdout.isatty()
-    prefix = "\033[2J\033[H" if interactive else ""
-    suffix = "" if interactive else "\n"
-    sys.stdout.write(prefix + "\n".join(frame) + suffix)
+    """Write one frame without exposing a cleared terminal between redraws."""
+    if sys.stdout.isatty():
+        output = "\033[H" + "\033[K\n".join(frame) + "\033[J"
+    else:
+        output = "\n".join(frame) + "\n"
+    sys.stdout.write(output)
     sys.stdout.flush()
 
 
