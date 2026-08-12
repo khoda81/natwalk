@@ -25,7 +25,7 @@ from natwalk.tui import (
     _tree_viewport,
     _wrap_spans,
 )
-from natwalk.view import CompactRow, View, partition_rows
+from natwalk.view import AncestorConnector, CompactRow, View, partition_rows
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -103,7 +103,10 @@ class TerminalWidthTests(unittest.TestCase):
             parent=0,
             rank=0,
             depth=2,
-            ancestor_last=(False, True),
+            ancestors=(
+                AncestorConnector(is_last=False, nats=1.25),
+                AncestorConnector(is_last=True, nats=1.25),
+            ),
             is_last=False,
             edges=(),
             edge_nats=1.25,
@@ -133,7 +136,10 @@ class TerminalWidthTests(unittest.TestCase):
             parent=0,
             rank=0,
             depth=2,
-            ancestor_last=(False, False),
+            ancestors=(
+                AncestorConnector(is_last=False, nats=1.1),
+                AncestorConnector(is_last=False, nats=1.2),
+            ),
             is_last=False,
             edges=(),
             edge_nats=1.25,
@@ -148,7 +154,6 @@ class TerminalWidthTests(unittest.TestCase):
             "nat_reference": 1.0,
             "branch_nats": 1.25,
             "branch_reference": 1.0,
-            "ancestor_branch_nats": (1.1, 1.2),
             "ancestor_columns": (4, 12),
             "branch_column": 20,
         }
@@ -229,7 +234,7 @@ class TerminalWidthTests(unittest.TestCase):
             parent=child,
             rank=0,
             depth=0,
-            ancestor_last=(),
+            ancestors=(),
             is_last=True,
             edges=(Edge(child, 0),),
             edge_nats=-math.log(0.8),
@@ -266,7 +271,7 @@ class TerminalWidthTests(unittest.TestCase):
             parent=0,
             rank=0,
             depth=0,
-            ancestor_last=(),
+            ancestors=(),
             is_last=False,
             edges=(Edge(0, 0), Edge(child, 0)),
             edge_nats=-math.log(0.6),
@@ -295,7 +300,7 @@ class TerminalWidthTests(unittest.TestCase):
             parent=tree.root,
             rank=0,
             depth=0,
-            ancestor_last=(),
+            ancestors=(),
             is_last=True,
             edges=(Edge(tree.root, 0),),
             edge_nats=0.0,
@@ -336,7 +341,7 @@ class TerminalWidthTests(unittest.TestCase):
             parent=0,
             rank=0,
             depth=0,
-            ancestor_last=(),
+            ancestors=(),
             is_last=True,
             edges=(),
             edge_nats=1.0,
@@ -369,7 +374,7 @@ class TerminalWidthTests(unittest.TestCase):
             parent=0,
             rank=-1,
             depth=0,
-            ancestor_last=(),
+            ancestors=(),
             is_last=True,
             edges=(),
             edge_nats=1.0,
