@@ -139,13 +139,7 @@ class HFCursor:
         input_ids = torch.tensor([tokens], dtype=torch.long, device=self.device)
         with torch.inference_mode():
             output = self.model(input_ids=input_ids, use_cache=False)
-        logits = (
-            output.logits[0, -1]
-            .detach()
-            .to(device="cpu", dtype=torch.float64)
-            .numpy()
-            .copy()
-        )
+        logits = output.logits[0, -1].detach().to(device="cpu", dtype=torch.float64).numpy().copy()
         logits -= np.max(logits)
         probabilities = np.exp(logits)
         probabilities /= probabilities.sum(dtype=np.float64)
