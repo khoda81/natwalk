@@ -47,12 +47,18 @@ def suggestion_tokens(
     """Derive suggestion tokens from structural tree edges."""
     if suggestion is None:
         return ()
-    return tuple(tree[edge.parent].distribution.token(edge.rank) for edge in suggestion_edges(tree, root, suggestion))
+    return tuple(
+        tree[edge.parent].distribution.token(edge.rank)
+        for edge in suggestion_edges(tree, root, suggestion)
+    )
 
 
 def suggestion_nats(tree: Tree, root: NodeId, suggestion: Suggestion) -> float:
     """Derive cumulative surprisal of one suggestion from ``root``."""
-    return sum(tree[edge.parent].distribution.nats(edge.rank) for edge in suggestion_edges(tree, root, suggestion))
+    return sum(
+        tree[edge.parent].distribution.nats(edge.rank)
+        for edge in suggestion_edges(tree, root, suggestion)
+    )
 
 
 def suggestion_complete(
