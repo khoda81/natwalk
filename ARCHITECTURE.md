@@ -182,7 +182,7 @@ The client may also request probability metadata with `Reveal(node, start, stop)
 
 The worker drains queued commands FIFO before returning to background search. This gives the command queue a simple authoritative meaning: after all queued causal commands complete, the last command target is the causal truth.
 
-A soft tree-memory budget may pause autonomous search based on retained authoritative distribution storage. Explicit causal commands are still allowed to discover required children beyond that budget.
+By default the engine has no tree-memory limit. If ``max_tree_bytes`` is configured, it is a soft limit on retained authoritative distribution storage: reaching it pauses autonomous search, while explicit causal commands may still discover required children beyond the limit. The current append-only tree does not reclaim that storage when the causal root moves; bounded long-running search therefore depends on the retention/reclamation policy tracked in #9.
 
 ## Tree synchronization
 

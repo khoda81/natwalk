@@ -65,7 +65,7 @@ class EngineTests(unittest.TestCase):
         finally:
             client.terminate()
 
-    def test_tree_memory_budget_pauses_background_search_but_not_commands(self) -> None:
+    def test_tree_memory_limit_pauses_background_search_but_not_commands(self) -> None:
         # Root authoritative payload is 3 entries * 12 packed bytes = 36 bytes.
         client = EngineClient(toy_cursor, max_tree_bytes=36)
         client.start()

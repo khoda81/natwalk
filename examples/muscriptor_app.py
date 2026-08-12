@@ -35,6 +35,16 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from natwalk.tui import run_tui  # noqa: E402
 
+
+class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+    """Show concrete defaults while leaving semantic ``None`` defaults to prose."""
+
+    def _get_help_string(self, action: argparse.Action) -> str:
+        if action.default is None:
+            return action.help or ""
+        return super()._get_help_string(action)
+
+
 VALID_CARD = 1393
 SAMPLE_RATE = 16_000
 CHUNK_SECONDS = 5
@@ -246,19 +256,59 @@ class MuscriptorCursorFactory:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("audio", type=Path)
-    parser.add_argument("--model", default="medium", choices=["small", "medium", "large"])
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--chunk", type=int, default=0, help="5-second chunk index")
-    parser.add_argument("--max-tokens", type=int, default=256)
-    parser.add_argument(
+    parser = argparse.ArgumentParser(
+        description="Explore MuScriptor's causal transcription probability tree.",
+        formatter_class=_HelpFormatter,
+    )
+    parser.add_argument("audio", type=Path, help="audio file to transcribe")
+
+    model = parser.add_argument_group("MuScriptor")
+    model.add_argument(
+        "--model",
+        default="medium",
+        choices=["small", "medium", "large"],
+        help="MuScriptor model size",
+    )
+    model.add_argument("--device", default="cuda", help="PyTorch inference device")
+    model.add_argument(
+        "--chunk",
+        type=int,
+        default=0,
+        help="zero-based 5-second audio chunk to explore",
+    )
+    model.add_argument(
+        "--max-tokens",
+        type=int,
+        default=256,
+        help="MuScriptor streaming-cache token capacity and maximum suggestion length",
+    )
+
+    natwalk = parser.add_argument_group("natwalk")
+    natwalk.add_argument(
         "--tree-lines",
         type=int,
-        help="maximum visible distribution rows; default fills the terminal",
+        help="maximum rendered tree rows; default uses the remaining terminal height",
     )
-    parser.add_argument("--budget-nats", type=float, default=1.5)
-    parser.add_argument("--budget-step", type=float, default=0.25)
+    natwalk.add_argument(
+        "--budget-nats",
+        type=float,
+        default=1.5,
+        help="maximum cumulative surprisal of the highlighted/accepted suggestion, in nats",
+    )
+    natwalk.add_argument(
+        "--budget-step",
+        type=float,
+        default=0.25,
+        help="amount '[' and ']' change --budget-nats by",
+    )
+    natwalk.add_argument(
+        "--max-tree-bytes",
+        type=int,
+        help=(
+            "soft limit on retained authoritative tree-distribution bytes; at the limit "
+            "autonomous search pauses but explicit navigation still works; default unlimited"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -279,6 +329,7 @@ def main() -> None:
         budget_nats=args.budget_nats,
         budget_step=args.budget_step,
         lines=args.tree_lines,
+        max_tree_bytes=args.max_tree_bytes,
     )
 
 

@@ -875,7 +875,7 @@ def _render(
     frame.append(_line(rule, columns))
     frame.append(
         _line(
-            f"budget {budget_nats:.2f} nat / {budget_nats / math.log(2):.2f} bit"
+            f"suggestion ≤ {budget_nats:.2f} nat"
             f"  ·  {len(tree.nodes)} nodes"
             f"  ·  {frontier} frontier",
             columns,
@@ -913,7 +913,7 @@ def _render(
             columns,
         ),
         _line(
-            "Tab/Shift-Tab suggestion  ·  [ ] budget  ·  d debug  ·  q quit",
+            "Tab/Shift-Tab suggestion  ·  [ ] suggestion limit  ·  d debug  ·  q quit",
             columns,
         ),
     )
@@ -1045,8 +1045,9 @@ class App:
         budget_nats: float,
         budget_step: float,
         lines: int | None,
+        max_tree_bytes: int | None = None,
     ) -> None:
-        self.engine = EngineClient(factory)
+        self.engine = EngineClient(factory, max_tree_bytes=max_tree_bytes)
         self.engine.start()
         try:
             self.engine.wait_ready()
@@ -1281,8 +1282,18 @@ def run_tui(
     budget_nats: float = 1.5,
     budget_step: float = 0.25,
     lines: int | None = None,
+    max_tree_bytes: int | None = None,
 ) -> None:
-    """Run a responsive terminal client around a process-isolated model engine."""
+    """Run a responsive terminal client around a process-isolated model engine.
+
+    ``budget_nats`` is the cumulative-surprisal limit for the highlighted and
+    accepted suggestion; it does not limit autonomous background search.
+    ``budget_step`` is how much ``[`` and ``]`` adjust that suggestion limit.
+
+    ``max_tree_bytes`` optionally limits retained authoritative probability-tree
+    distribution storage. At the limit autonomous search pauses while explicit
+    navigation remains available. ``None`` means unlimited.
+    """
     app = App(
         factory,
         describe,
@@ -1293,6 +1304,7 @@ def run_tui(
         budget_nats=budget_nats,
         budget_step=budget_step,
         lines=lines,
+        max_tree_bytes=max_tree_bytes,
     )
     hard_stop = False
 

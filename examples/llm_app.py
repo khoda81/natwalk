@@ -30,6 +30,15 @@ from natwalk.tree import RankedDistribution
 from natwalk.tui import run_tui
 
 
+class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+    """Show concrete defaults while leaving semantic ``None`` defaults to prose."""
+
+    def _get_help_string(self, action: argparse.Action) -> str:
+        if action.default is None:
+            return action.help or ""
+        return super()._get_help_string(action)
+
+
 def resolve_ollama_gguf(model: str) -> Path:
     """Return the GGUF blob behind an Ollama model without copying it."""
     try:
@@ -234,28 +243,70 @@ class TokenDisplay:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Explore a local GGUF model's next-token probability tree.",
+        formatter_class=_HelpFormatter,
+    )
     parser.add_argument("prompt", help="raw text prefix to continue")
-    parser.add_argument("--model", default="ministral-3:14b", help="Ollama model name")
-    parser.add_argument("--model-path", help="GGUF path; bypasses Ollama lookup")
-    parser.add_argument("--n-ctx", type=int, default=4096)
-    parser.add_argument("--n-batch", type=int, default=512)
-    parser.add_argument(
+
+    model = parser.add_argument_group("model")
+    model.add_argument(
+        "--model",
+        default="ministral-3:14b",
+        help="Ollama model name used when --model-path is omitted",
+    )
+    model.add_argument("--model-path", help="local GGUF path; bypasses Ollama lookup")
+    model.add_argument("--n-ctx", type=int, default=4096, help="llama.cpp context size in tokens")
+    model.add_argument("--n-batch", type=int, default=512, help="llama.cpp evaluation batch size")
+    model.add_argument(
         "--n-gpu-layers",
         type=int,
         default=-1,
         help="layers to offload to GPU; -1 means all layers, 0 forces CPU",
     )
-    parser.add_argument("--threads", type=int)
-    parser.add_argument("--max-tokens", type=int, default=128)
-    parser.add_argument(
+    model.add_argument(
+        "--threads",
+        type=int,
+        help="CPU threads for llama.cpp; default lets llama.cpp choose",
+    )
+    model.add_argument(
+        "--llama-verbose",
+        action="store_true",
+        help="enable verbose llama.cpp logging",
+    )
+
+    natwalk = parser.add_argument_group("natwalk")
+    natwalk.add_argument(
+        "--max-tokens",
+        type=int,
+        default=128,
+        help="maximum token length of suggestions and row previews; does not cap background search",
+    )
+    natwalk.add_argument(
         "--tree-lines",
         type=int,
-        help="maximum visible distribution rows; default fills the terminal",
+        help="maximum rendered tree rows; default uses the remaining terminal height",
     )
-    parser.add_argument("--budget-nats", type=float, default=1.5)
-    parser.add_argument("--budget-step", type=float, default=0.25)
-    parser.add_argument("--llama-verbose", action="store_true")
+    natwalk.add_argument(
+        "--budget-nats",
+        type=float,
+        default=1.5,
+        help="maximum cumulative surprisal of the highlighted/accepted suggestion, in nats",
+    )
+    natwalk.add_argument(
+        "--budget-step",
+        type=float,
+        default=0.25,
+        help="amount '[' and ']' change --budget-nats by",
+    )
+    natwalk.add_argument(
+        "--max-tree-bytes",
+        type=int,
+        help=(
+            "soft limit on retained authoritative tree-distribution bytes; at the limit "
+            "autonomous search pauses but explicit navigation still works; default unlimited"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -306,6 +357,7 @@ def main() -> None:
             budget_nats=args.budget_nats,
             budget_step=args.budget_step,
             lines=args.tree_lines,
+            max_tree_bytes=args.max_tree_bytes,
         )
     finally:
         tokenizer.close()

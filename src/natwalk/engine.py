@@ -17,8 +17,6 @@ from .tree import NodeId
 type CommandId = int
 type CursorFactory = Callable[[], Cursor]
 
-_DEFAULT_MAX_TREE_BYTES = 2 * 1024**3
-
 
 @dataclass(frozen=True, slots=True)
 class Advance:
@@ -79,13 +77,18 @@ class EngineError(RuntimeError):
 
 
 class EngineClient:
-    """Client-side process transport plus a progressive idempotent tree replica."""
+    """Client-side process transport plus a progressive idempotent tree replica.
+
+    ``max_tree_bytes`` is an optional soft limit on authoritative retained
+    distribution storage. Reaching it pauses autonomous search but never blocks
+    explicit causal navigation. ``None`` leaves autonomous search unlimited.
+    """
 
     def __init__(
         self,
         factory: CursorFactory,
         *,
-        max_tree_bytes: int | None = _DEFAULT_MAX_TREE_BYTES,
+        max_tree_bytes: int | None = None,
     ) -> None:
         if max_tree_bytes is not None and max_tree_bytes <= 0:
             raise ValueError("max_tree_bytes must be positive or None")
