@@ -825,14 +825,14 @@ def _terminal():
         return
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
-    sys.stdout.write("\033[?1049h\033[H\033[?25l\033[?1000h\033[?1006h")
+    sys.stdout.write("\033[?1049h\033[H\033[?25l\033[?1007h")
     sys.stdout.flush()
     tty.setcbreak(fd)
     try:
         yield
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        sys.stdout.write("\033[?1006l\033[?1000l\033[?25h\033[?1049l")
+        sys.stdout.write("\033[?1007l\033[?25h\033[?1049l")
         sys.stdout.flush()
 
 
