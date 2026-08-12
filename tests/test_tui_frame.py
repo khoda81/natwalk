@@ -26,7 +26,10 @@ class FrameOutputTests(unittest.TestCase):
 
         prefix = "\033[2J\033[H"
         self.assertEqual(stdout.getvalue(), prefix + "row 1\nrow 2\nrow 3")
-        self.assertEqual(stdout.getvalue()[len(prefix) :].count("\n"), len(frame) - 1)
+        self.assertEqual(
+            stdout.getvalue()[len(prefix) :].count("\n"),
+            len(frame) - 1,
+        )
         self.assertFalse(stdout.getvalue().endswith("\n"))
 
     def test_non_interactive_frame_remains_line_terminated(self) -> None:
