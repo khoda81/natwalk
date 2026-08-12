@@ -26,17 +26,9 @@ from typing import cast
 import numpy as np
 from llama_cpp import Llama
 
+from natwalk.cli import HelpFormatter, add_tui_arguments
 from natwalk.tree import RankedDistribution
 from natwalk.tui import run_tui
-
-
-class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Show concrete defaults while leaving semantic ``None`` defaults to prose."""
-
-    def _get_help_string(self, action: argparse.Action) -> str:
-        if action.default is None:
-            return action.help or ""
-        return super()._get_help_string(action)
 
 
 def resolve_ollama_gguf(model: str) -> Path:
@@ -245,7 +237,7 @@ class TokenDisplay:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Explore a local GGUF model's next-token probability tree.",
-        formatter_class=_HelpFormatter,
+        formatter_class=HelpFormatter,
     )
     parser.add_argument("prompt", help="raw text prefix to continue")
 
@@ -275,36 +267,11 @@ def parse_args() -> argparse.Namespace:
         help="enable verbose llama.cpp logging",
     )
 
-    natwalk = parser.add_argument_group("natwalk")
-    natwalk.add_argument(
-        "--max-tokens",
-        type=int,
-        default=128,
-        help="maximum token length of suggestions and row previews; does not cap background search",
-    )
-    natwalk.add_argument(
-        "--tree-lines",
-        type=int,
-        help="maximum rendered tree rows; default uses the remaining terminal height",
-    )
-    natwalk.add_argument(
-        "--budget-nats",
-        type=float,
-        default=1.5,
-        help="maximum cumulative surprisal of the highlighted/accepted suggestion, in nats",
-    )
-    natwalk.add_argument(
-        "--budget-step",
-        type=float,
-        default=0.25,
-        help="amount '[' and ']' change --budget-nats by",
-    )
-    natwalk.add_argument(
-        "--max-tree-bytes",
-        type=int,
-        help=(
-            "soft limit on retained authoritative tree-distribution bytes; at the limit "
-            "autonomous search pauses but explicit navigation still works; default unlimited"
+    add_tui_arguments(
+        parser,
+        max_tokens_default=128,
+        max_tokens_help=(
+            "maximum token length of suggestions and row previews; does not cap background search"
         ),
     )
     return parser.parse_args()

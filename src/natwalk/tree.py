@@ -15,6 +15,14 @@ from typing import Protocol, runtime_checkable
 type NodeId = int
 
 
+@dataclass(frozen=True, slots=True)
+class Edge:
+    """One structural outgoing edge, identified without duplicating token data."""
+
+    parent: NodeId
+    rank: int
+
+
 @runtime_checkable
 class RankedDistribution(Protocol):
     """Probability-ranked next-symbol distribution.

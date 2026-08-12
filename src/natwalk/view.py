@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from itertools import islice
 
-from .tree import NodeId, RankedDistribution, Tree
+from .tree import Edge, NodeId, RankedDistribution, Tree
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +38,9 @@ class Row:
 class CompactRow:
     """One physical row for one event in the visible probability partition.
 
-    ``tokens`` and ``ranks`` are the parallel radix suffix not already factored
-    by earlier rows. ``path_nats`` is the exact event surprisal from the view
+    ``edges`` is the structural radix suffix not already factored by earlier
+    rows. Token ids and edge costs are derived from those edges and the tree.
+    ``path_nats`` is the exact event surprisal from the view
     root. ``edge_nats`` is the aggregate surprisal of the displayed branch from
     the view root, used only to shade its connector. ``ancestor_nats`` gives the
     corresponding aggregate surprisal for every visible ancestor connector.
@@ -50,7 +51,7 @@ class CompactRow:
     depth: int
     ancestor_last: tuple[bool, ...]
     is_last: bool
-    tokens: tuple[int, ...]
+    edges: tuple[Edge, ...]
     edge_nats: float
     path_nats: float
     child: NodeId | None
@@ -58,25 +59,36 @@ class CompactRow:
     forest_count: int = 0
     forest_start: int = 0
     ancestor_nats: tuple[float, ...] = ()
-    ranks: tuple[int, ...] = ()
+
+    @property
+    def ranks(self) -> tuple[int, ...]:
+        return tuple(edge.rank for edge in self.edges)
 
     @property
     def forest(self) -> bool:
         return self.forest_count != 0
 
 
+def row_tokens(tree: Tree, row: CompactRow) -> tuple[int, ...]:
+    """Derive compact-row token ids from its structural edges."""
+    return tuple(tree[edge.parent].distribution.token(edge.rank) for edge in row.edges)
+
+
 @dataclass(frozen=True, slots=True)
 class _PartitionEvent:
     """One disjoint cylinder or sibling forest in a display partition."""
 
-    ranks: tuple[int, ...]
-    tokens: tuple[int, ...]
+    edges: tuple[Edge, ...]
     nats: float
     node: NodeId | None = None
     forest_parent: NodeId | None = None
     forest_start: int = 0
     forest_end: int = 0
     forest_base_nats: float = 0.0
+
+    @property
+    def ranks(self) -> tuple[int, ...]:
+        return tuple(edge.rank for edge in self.edges)
 
     @property
     def forest(self) -> bool:
@@ -207,8 +219,7 @@ def partition_rows(
             parent=root,
             start=start,
             end=len(distribution),
-            prefix_ranks=(),
-            prefix_tokens=(),
+            prefix_edges=(),
             base_nats=0.0,
             suffix_masses=suffix_masses,
             range_nats=initial_nats,
@@ -249,16 +260,14 @@ def _partition_branch(
     *,
     parent: NodeId,
     rank: int,
-    prefix_ranks: tuple[int, ...],
-    prefix_tokens: tuple[int, ...],
+    prefix_edges: tuple[Edge, ...],
     base_nats: float,
 ) -> _PartitionEvent:
     distribution = tree[parent].distribution
     if not 0 <= rank < distribution.revealed:
         raise IndexError(f"rank {rank} has not been revealed")
     return _PartitionEvent(
-        ranks=(*prefix_ranks, rank),
-        tokens=(*prefix_tokens, distribution.token(rank)),
+        edges=(*prefix_edges, Edge(parent, rank)),
         nats=base_nats + distribution.nats(rank),
         node=tree.child(parent, rank),
     )
@@ -270,8 +279,7 @@ def _partition_range(
     parent: NodeId,
     start: int,
     end: int,
-    prefix_ranks: tuple[int, ...],
-    prefix_tokens: tuple[int, ...],
+    prefix_edges: tuple[Edge, ...],
     base_nats: float,
     suffix_masses: _SuffixMassCache,
     range_nats: float | None = None,
@@ -284,8 +292,7 @@ def _partition_range(
             tree,
             parent=parent,
             rank=start,
-            prefix_ranks=prefix_ranks,
-            prefix_tokens=prefix_tokens,
+            prefix_edges=prefix_edges,
             base_nats=base_nats,
         )
     if range_nats is None:
@@ -300,8 +307,7 @@ def _partition_range(
                 parent_nats=base_nats,
             )
     return _PartitionEvent(
-        ranks=prefix_ranks,
-        tokens=prefix_tokens,
+        edges=prefix_edges,
         nats=range_nats,
         forest_parent=parent,
         forest_start=start,
@@ -330,8 +336,7 @@ def _partition_split(
             tree,
             parent=parent,
             rank=event.forest_start,
-            prefix_ranks=event.ranks,
-            prefix_tokens=event.tokens,
+            prefix_edges=event.edges,
             base_nats=event.forest_base_nats,
         )
         rest = _partition_range(
@@ -339,8 +344,7 @@ def _partition_split(
             parent=parent,
             start=event.forest_start + 1,
             end=event.forest_end,
-            prefix_ranks=event.ranks,
-            prefix_tokens=event.tokens,
+            prefix_edges=event.edges,
             base_nats=event.forest_base_nats,
             suffix_masses=suffix_masses,
         )
@@ -357,8 +361,7 @@ def _partition_split(
         tree,
         parent=child,
         rank=0,
-        prefix_ranks=event.ranks,
-        prefix_tokens=event.tokens,
+        prefix_edges=event.edges,
         base_nats=event.nats,
     )
     rest = _partition_range(
@@ -366,8 +369,7 @@ def _partition_split(
         parent=child,
         start=1,
         end=len(distribution),
-        prefix_ranks=event.ranks,
-        prefix_tokens=event.tokens,
+        prefix_edges=event.edges,
         base_nats=event.nats,
         suffix_masses=suffix_masses,
     )
@@ -497,7 +499,7 @@ def _partition_layout_rows(
                 depth=len(ancestor_prefixes),
                 ancestor_last=ancestor_last,
                 is_last=is_last,
-                tokens=event.tokens[common:],
+                edges=event.edges[common:],
                 edge_nats=branch_nats,
                 path_nats=event.nats,
                 child=child,
@@ -505,7 +507,6 @@ def _partition_layout_rows(
                 forest_count=forest_count,
                 forest_start=forest_start,
                 ancestor_nats=ancestor_nats,
-                ranks=event.ranks[common:],
             )
         )
         previous = event

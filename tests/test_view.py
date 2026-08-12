@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from natwalk.search import Search
 from natwalk.tree import Distribution, Tree
-from natwalk.view import View, enter, forest_nats, move, parent, partition_rows, rows
+from natwalk.view import View, enter, forest_nats, move, parent, partition_rows, row_tokens, rows
 
 
 def distribution(*probabilities: float) -> Distribution:
@@ -65,7 +65,7 @@ class ViewTests(unittest.TestCase):
         self.assertEqual(len(visible), 1)
         self.assertTrue(visible[0].forest)
         self.assertEqual(visible[0].forest_count, 3)
-        self.assertEqual(visible[0].tokens, ())
+        self.assertEqual(row_tokens(tree, visible[0]), ())
         self.assertAlmostEqual(visible[0].path_nats, 0.0)
 
     def test_partition_refinement_conserves_probability_mass(self) -> None:
@@ -103,7 +103,9 @@ class ViewTests(unittest.TestCase):
         four = partition_rows(tree, View(), row_limit=4)
 
         def paths(visible):
-            return [(*tree.path_from(tree.root, row.parent), *row.tokens) for row in visible]
+            return [
+                (*tree.path_from(tree.root, row.parent), *row_tokens(tree, row)) for row in visible
+            ]
 
         self.assertEqual(paths(three), [(0,), (1,), (2,)])
         self.assertEqual(paths(four), [(0, 0), (0, 1), (1,), (2,)])
@@ -126,10 +128,10 @@ class ViewTests(unittest.TestCase):
 
         self.assertEqual(len(visible), 4)
         self.assertEqual(
-            [(*tree.path_from(tree.root, row.parent), *row.tokens) for row in visible],
+            [(*tree.path_from(tree.root, row.parent), *row_tokens(tree, row)) for row in visible],
             [(0, 0, 0), (0, 0, 1), (0, 1), (1,)],
         )
-        self.assertEqual([row.tokens for row in visible], [(0, 0, 0), (1,), (1,), (1,)])
+        self.assertEqual([row_tokens(tree, row) for row in visible], [(0, 0, 0), (1,), (1,), (1,)])
         self.assertEqual([row.ranks for row in visible], [(0, 0, 0), (1,), (1,), (1,)])
         self.assertEqual([row.depth for row in visible], [0, 2, 1, 0])
         self.assertEqual(visible[1].parent, second)

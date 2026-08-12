@@ -2,23 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from .tree import Edge, NodeId, Tree
 
-from .tree import NodeId, Tree
-
-
-@dataclass(frozen=True, slots=True)
-class Suggestion:
-    """Stable endpoint edge of one suggested continuation.
-
-    ``parent`` is always a discovered node. ``rank`` identifies its outgoing
-    edge whether or not that edge's child distribution has been discovered yet.
-    No token sequence is cached: text, cost, and highlighted ancestry are all
-    derived from the current tree.
-    """
-
-    parent: NodeId
-    rank: int
+# A suggestion is exactly one structural endpoint edge. Keeping this alias
+# preserves the public name without introducing a second representation.
+Suggestion = Edge
 
 
 def suggestion_edges(
@@ -175,10 +163,7 @@ def cycle_suggestion(
         max_tokens=max_tokens,
         limit=limit,
     )
-    try:
-        index = candidates.index(selected)
-    except ValueError:
-        index = 0
+    index = candidates.index(selected)
     return candidates[(index + step) % len(candidates)]
 
 

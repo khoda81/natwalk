@@ -6,7 +6,7 @@ import time
 import unittest
 from collections.abc import Sequence
 
-from natwalk.tree import Distribution, Tree
+from natwalk.tree import Distribution, Edge, Tree
 from natwalk.tui import (
     _PREDICTION_STYLE,
     _SUGGESTION_STYLE,
@@ -105,7 +105,7 @@ class TerminalWidthTests(unittest.TestCase):
             depth=2,
             ancestor_last=(False, True),
             is_last=False,
-            tokens=(1, 2, 3),
+            edges=(),
             edge_nats=1.25,
             path_nats=13.506,
             child=4,
@@ -124,6 +124,7 @@ class TerminalWidthTests(unittest.TestCase):
                     selected=True,
                     columns=columns,
                     color=False,
+                    tokens=(1, 2, 3),
                 )
                 self.assertLessEqual(_cell_width(line), columns)
 
@@ -134,7 +135,7 @@ class TerminalWidthTests(unittest.TestCase):
             depth=2,
             ancestor_last=(False, False),
             is_last=False,
-            tokens=(1, 2),
+            edges=(),
             edge_nats=1.25,
             path_nats=3.5,
             child=4,
@@ -152,8 +153,8 @@ class TerminalWidthTests(unittest.TestCase):
             "branch_column": 20,
         }
 
-        plain = _format_tree_row(row, str, color=False, **kwargs)
-        colored = _format_tree_row(row, str, color=True, **kwargs)
+        plain = _format_tree_row(row, str, color=False, tokens=(1, 2), **kwargs)
+        colored = _format_tree_row(row, str, color=True, tokens=(1, 2), **kwargs)
 
         self.assertEqual(_ANSI.sub("", colored), plain)
         self.assertTrue(plain.endswith("    3.500 nat"))
@@ -230,7 +231,7 @@ class TerminalWidthTests(unittest.TestCase):
             depth=0,
             ancestor_last=(),
             is_last=True,
-            tokens=(20,),
+            edges=(Edge(child, 0),),
             edge_nats=-math.log(0.8),
             path_nats=-math.log(0.8),
             child=None,
@@ -267,15 +268,14 @@ class TerminalWidthTests(unittest.TestCase):
             depth=0,
             ancestor_last=(),
             is_last=False,
-            tokens=(10, 20),
+            edges=(Edge(0, 0), Edge(child, 0)),
             edge_nats=-math.log(0.6),
             path_nats=-math.log(0.6 * 0.7),
             child=child,
-            ranks=(0, 0),
         )
 
         self.assertEqual(
-            _row_separator_nats(tree, View(), row),
+            _row_separator_nats(tree, row),
             (-math.log(0.7),),
         )
 
@@ -297,16 +297,15 @@ class TerminalWidthTests(unittest.TestCase):
             depth=0,
             ancestor_last=(),
             is_last=True,
-            tokens=(10,),
+            edges=(Edge(tree.root, 0),),
             edge_nats=0.0,
             path_nats=0.0,
             child=first,
             open_ended=True,
-            ranks=(0,),
         )
         before = len(tree.nodes)
 
-        tokens, separator_nats, complete = _row_preview(tree, View(), row)
+        tokens, separator_nats, complete = _row_preview(tree, row)
 
         self.assertEqual(tokens, (20, 30))
         self.assertEqual(
@@ -326,7 +325,7 @@ class TerminalWidthTests(unittest.TestCase):
         )
         forest = next(row for row in partition_rows(tree, View(), row_limit=2) if row.forest)
 
-        tokens, separator_nats, complete = _row_preview(tree, View(), forest)
+        tokens, separator_nats, complete = _row_preview(tree, forest)
 
         self.assertEqual(tokens, (11,))
         self.assertEqual(separator_nats, (-math.log(0.3),))
@@ -339,7 +338,7 @@ class TerminalWidthTests(unittest.TestCase):
             depth=0,
             ancestor_last=(),
             is_last=True,
-            tokens=(1,),
+            edges=(),
             edge_nats=1.0,
             path_nats=1.0,
             child=1,
@@ -357,8 +356,8 @@ class TerminalWidthTests(unittest.TestCase):
             "preview_complete": False,
         }
 
-        plain = _format_tree_row(row, str, color=False, **kwargs)
-        colored = _format_tree_row(row, str, color=True, **kwargs)
+        plain = _format_tree_row(row, str, color=False, tokens=(1,), **kwargs)
+        colored = _format_tree_row(row, str, color=True, tokens=(1,), **kwargs)
 
         self.assertIn("1 · 2 · 3 · …", plain)
         self.assertNotIn("1 · …", plain)
@@ -372,7 +371,7 @@ class TerminalWidthTests(unittest.TestCase):
             depth=0,
             ancestor_last=(),
             is_last=True,
-            tokens=(),
+            edges=(),
             edge_nats=1.0,
             path_nats=1.0,
             child=None,

@@ -4,7 +4,7 @@ import math
 import unittest
 
 from natwalk.tree import Distribution, Tree
-from natwalk.view import View, partition_rows
+from natwalk.view import View, partition_rows, row_tokens
 
 
 class PartitionNumericsTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class PartitionNumericsTests(unittest.TestCase):
 
         self.assertEqual(len(visible), 3)
         self.assertTrue(all(not row.forest for row in visible))
-        self.assertEqual([row.tokens for row in visible], [(0,), (1,), (2,)])
+        self.assertEqual([row_tokens(tree, row) for row in visible], [(0,), (1,), (2,)])
         for row, probability in zip(visible, probabilities, strict=True):
             self.assertAlmostEqual(row.path_nats, -math.log(probability))
 

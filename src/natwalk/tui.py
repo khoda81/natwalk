@@ -24,7 +24,7 @@ from .query import (
     suggestion_tokens,
 )
 from .tree import NodeId, Tree
-from .view import CompactRow, View, forest_nats, move, partition_rows
+from .view import CompactRow, View, forest_nats, move, partition_rows, row_tokens
 
 type DescribeToken = Callable[[int], str]
 type DecodeTokens = Callable[[tuple[int, ...]], str]
@@ -222,69 +222,27 @@ def _row_inline_branches(
 ) -> tuple[int, ...]:
     """Return token-boundary offsets that branch again later in the partition."""
     prefix = tree.path_from(view.node, row.parent)
-    full_path = (*prefix, *row.tokens)
+    tokens = row_tokens(tree, row)
+    full_path = (*prefix, *tokens)
     return tuple(
         offset
-        for offset in range(1, len(row.tokens) + 1)
+        for offset in range(1, len(tokens) + 1)
         if full_path[: len(prefix) + offset] in branch_prefixes
     )
 
 
-def _row_separator_nats(tree: Tree, view: View, row: CompactRow) -> tuple[float, ...]:
-    """Return local surprisal for each collapsed token edge."""
-    if len(row.tokens) < 2:
-        return ()
-
-    if row.ranks:
-        if len(row.ranks) != len(row.tokens):
-            raise ValueError("compact row rank count must match token count")
-        ranks = row.ranks
-    else:
-        node = row.parent
-        fallback: list[int] = []
-        for token in row.tokens:
-            distribution = tree[node].distribution
-            try:
-                rank = distribution.rank(token)
-            except ValueError as error:
-                raise ValueError("compact row token is not an edge of its parent") from error
-            fallback.append(rank)
-            child = tree.child(node, rank)
-            if child is None:
-                break
-            node = child
-        ranks = tuple(fallback)
-        if len(ranks) != len(row.tokens):
-            raise ValueError("compact row crosses an undiscovered child")
-
-    node = row.parent
-    result: list[float] = []
-    for index, (token, rank) in enumerate(zip(row.tokens, ranks, strict=True)):
-        distribution = tree[node].distribution
-        if not 0 <= rank < distribution.revealed or distribution.token(rank) != token:
-            raise ValueError("compact row rank does not identify its token edge")
-        if index:
-            result.append(distribution.nats(rank))
-        if index + 1 < len(row.tokens):
-            child = tree.child(node, rank)
-            if child is None:
-                raise ValueError("collapsed token edge crosses an undiscovered child")
-            node = child
-    return tuple(result)
+def _row_separator_nats(tree: Tree, row: CompactRow) -> tuple[float, ...]:
+    """Return local surprisal for each collapsed token boundary."""
+    return tuple(tree[edge.parent].distribution.nats(edge.rank) for edge in row.edges[1:])
 
 
 def _row_preview(
     tree: Tree,
-    view: View,
     row: CompactRow,
     *,
     max_tokens: int = 64,
 ) -> tuple[tuple[int, ...], tuple[float, ...], bool]:
-    """Return read-only best-known context beyond one measured row event.
-
-    Preview tokens never materialize tree state. The returned edge surprisals are
-    local conditional edge costs and belong only to the preview separators.
-    """
+    """Return read-only best-known context beyond one measured row event."""
     if max_tokens <= 0:
         return (), (), False
 
@@ -293,15 +251,14 @@ def _row_preview(
 
     if row.forest:
         node = row.parent
-        for rank in row.ranks:
-            child = tree.child(node, rank)
-            if child is None:
-                raise ValueError("forest row prefix crosses an undiscovered edge")
+        if row.edges:
+            last = row.edges[-1]
+            child = tree.child(last.parent, last.rank)
+            assert child is not None
             node = child
 
         distribution = tree[node].distribution
-        if not 0 <= row.forest_start < len(distribution):
-            raise ValueError("forest preview start is outside its parent distribution")
+        assert 0 <= row.forest_start < len(distribution)
         if row.forest_start >= distribution.revealed:
             return (), (), False
         rank = row.forest_start
@@ -507,49 +464,16 @@ def _row_display_nats(tree: Tree, root: NodeId, view: View, row: CompactRow) -> 
     return tree.path_nats(view.node, ancestor=root) + row.path_nats
 
 
-def _row_branch_nats(tree: Tree, root: NodeId, display_nats: float, row: CompactRow) -> float:
-    """Return the exact aggregate surprisal represented by this radix connector."""
-    return row.edge_nats
-
-
 def _row_token_styles(
-    tree: Tree,
     row: CompactRow,
     suggestion: set[Suggestion],
     *,
     selected: bool,
 ) -> tuple[str, ...]:
-    """Color compact-row tokens from structural suggestion/UI state only."""
-    if row.ranks:
-        if len(row.ranks) != len(row.tokens):
-            raise ValueError("compact row rank count must match token count")
-        ranks = row.ranks
-    else:
-        node = row.parent
-        fallback: list[int] = []
-        for token in row.tokens:
-            distribution = tree[node].distribution
-            try:
-                rank = distribution.rank(token)
-            except ValueError as error:
-                raise ValueError("compact row token is not an edge of its parent") from error
-            fallback.append(rank)
-            child = tree.child(node, rank)
-            if child is None:
-                break
-            node = child
-        ranks = tuple(fallback)
-        if len(ranks) != len(row.tokens):
-            raise ValueError("compact row crosses an undiscovered child")
-
+    """Color compact-row edges from structural suggestion/UI state only."""
     styles: list[str] = []
-    node = row.parent
-    for index, (token, rank) in enumerate(zip(row.tokens, ranks, strict=True)):
-        distribution = tree[node].distribution
-        if distribution.token(rank) != token:
-            raise ValueError("compact row rank does not identify its token edge")
-
-        if Suggestion(node, rank) in suggestion:
+    for edge in row.edges:
+        if edge in suggestion:
             style = _SUGGESTION_STYLE
         elif selected:
             style = _SELECTED_STYLE
@@ -558,13 +482,6 @@ def _row_token_styles(
         else:
             style = ""
         styles.append(style)
-
-        if index + 1 < len(row.tokens):
-            child = tree.child(node, rank)
-            if child is None:
-                raise ValueError("compact row crosses an undiscovered child")
-            node = child
-
     return tuple(styles)
 
 
@@ -630,6 +547,7 @@ def _format_tree_row(
     selected: bool,
     columns: int,
     color: bool,
+    tokens: tuple[int, ...] = (),
     display_nats: float | None = None,
     nat_reference: float | None = None,
     branch_nats: float | None = None,
@@ -672,11 +590,11 @@ def _format_tree_row(
 
     if token_styles is None:
         fallback = _SELECTED_STYLE if selected else (_FOREST_STYLE if row.forest else "")
-        token_styles = (fallback,) * len(row.tokens)
-    if len(token_styles) != len(row.tokens):
+        token_styles = (fallback,) * len(tokens)
+    if len(token_styles) != len(tokens):
         raise ValueError("token style count must match compact row token count")
 
-    expected_separators = max(0, len(row.tokens) - 1)
+    expected_separators = max(0, len(tokens) - 1)
     if separator_nats is None:
         separator_nats = (branch_nats,) * expected_separators
     if len(separator_nats) != expected_separators:
@@ -686,7 +604,7 @@ def _format_tree_row(
 
     branch_offsets = set(inline_branches)
     label_spans: list[tuple[str, str]] = []
-    for index, (token, style) in enumerate(zip(row.tokens, token_styles, strict=True)):
+    for index, (token, style) in enumerate(zip(tokens, token_styles, strict=True)):
         if index:
             separator_style = _grayscale(math.exp(-separator_nats[index - 1]))
             separator = " ┬ " if index in branch_offsets else " · "
@@ -695,7 +613,7 @@ def _format_tree_row(
     if row.forest or (row.open_ended and not preview_tokens):
         if label_spans:
             separator_style = _grayscale(_relative_probability(row.path_nats, branch_reference))
-            separator = " ┬ " if len(row.tokens) in branch_offsets else " · "
+            separator = " ┬ " if len(tokens) in branch_offsets else " · "
             label_spans.append((separator, separator_style))
         label_spans.append(("…", _FOREST_STYLE))
 
@@ -940,10 +858,7 @@ def _render(
             view_base_nats + forest_nats(distribution, view.first_rank, start) if above else None
         )
         row_display_nats = [_row_display_nats(tree, root, view, row) for row in visible]
-        row_branch_nats = [
-            _row_branch_nats(tree, root, display_nats, row)
-            for row, display_nats in zip(visible, row_display_nats, strict=True)
-        ]
+        row_branch_nats = [row.edge_nats for row in visible]
         row_ancestor_branch_nats = _ancestor_branch_nats(visible, row_branch_nats)
         visible_branch_prefixes = _branch_prefixes(tree, view, visible)
 
@@ -979,6 +894,7 @@ def _render(
             row_ancestor_branch_nats,
             strict=True,
         ):
+            tokens = row_tokens(tree, row)
             row_selected = not row.forest and row.parent == view.node and row.rank == selected
             ancestor_columns, branch_column = _row_branch_columns(
                 tree,
@@ -989,7 +905,6 @@ def _render(
             )
             preview_tokens, preview_separator_nats, preview_complete = _row_preview(
                 tree,
-                view,
                 row,
                 max_tokens=min(max_tokens, 64),
             )
@@ -997,6 +912,7 @@ def _render(
                 _format_tree_row(
                     row,
                     describe,
+                    tokens=tokens,
                     selected=row_selected,
                     columns=columns,
                     color=color,
@@ -1013,12 +929,11 @@ def _render(
                         row,
                         visible_branch_prefixes,
                     ),
-                    separator_nats=_row_separator_nats(tree, view, row),
+                    separator_nats=_row_separator_nats(tree, row),
                     preview_tokens=preview_tokens,
                     preview_separator_nats=preview_separator_nats,
                     preview_complete=preview_complete,
                     token_styles=_row_token_styles(
-                        tree,
                         row,
                         suggested_edges,
                         selected=row_selected,
@@ -1066,7 +981,8 @@ class App:
 
         self.view = View(node=self.root)
         self.suggestion: Suggestion | None = None
-        self.pending: list[tuple[CommandId, NodeId | None]] = []
+        self._pending_known: list[tuple[CommandId, NodeId]] = []
+        self._pending_unknown: CommandId | None = None
         self.debug = False
         self.quit_requested = False
         self.last_render = 0.0
@@ -1084,9 +1000,17 @@ class App:
         return root
 
     @property
+    def pending(self) -> tuple[CommandId, ...]:
+        """Queued causal command ids in execution order."""
+        known = tuple(command_id for command_id, _ in self._pending_known)
+        if self._pending_unknown is None:
+            return known
+        return (*known, self._pending_unknown)
+
+    @property
     def navigation_blocked(self) -> bool:
-        """Whether the last queued move ends at a child not yet present in the replica."""
-        return bool(self.pending and self.pending[-1][1] is None)
+        """Whether the queued tail ends at a child not yet present in the replica."""
+        return self._pending_unknown is not None
 
     def _refresh_suggestion(self) -> bool:
         previous = self.suggestion
@@ -1100,27 +1024,29 @@ class App:
         return self.suggestion != previous
 
     def poll(self) -> bool:
-        """Apply engine progress without snapping past the last queued navigation target."""
+        """Apply engine progress without snapping past queued navigation targets."""
         changed = self.engine.poll() > 0
         completed = 0
 
-        for command_id, target in self.pending:
+        for command_id, target in self._pending_known:
             done = self.engine.take_done(command_id)
             if done is None:
                 break
-            if target is not None and done.node != target:
+            if done.node != target:
                 raise RuntimeError(
                     f"queued navigation diverged: expected node {target}, got {done.node}"
                 )
-            if target is None:
-                if completed + 1 != len(self.pending):
-                    raise RuntimeError("unknown navigation target must be last in queue")
-                self.view = View(node=done.node)
-                changed = True
             completed += 1
 
         if completed:
-            del self.pending[:completed]
+            del self._pending_known[:completed]
+
+        if not self._pending_known and self._pending_unknown is not None:
+            done = self.engine.take_done(self._pending_unknown)
+            if done is not None:
+                self._pending_unknown = None
+                self.view = View(node=done.node)
+                changed = True
 
         if not self.pending and self.view.node != self.root:
             self.view = View(node=self.root)
@@ -1236,7 +1162,7 @@ class App:
             return False
 
         command_id = self.engine.rewind()
-        self.pending.append((command_id, parent))
+        self._pending_known.append((command_id, parent))
         self.view = View(node=parent)
         self._refresh_suggestion()
         return True
@@ -1248,7 +1174,7 @@ class App:
         tokens = suggestion_tokens(self.tree, self.view.node, self.suggestion)
         if not tokens:
             return False
-        self.pending.append((self.engine.advance(tokens), None))
+        self._pending_unknown = self.engine.advance(tokens)
         return False
 
     def _advance_selected(self) -> bool:
@@ -1261,11 +1187,12 @@ class App:
         selected = min(self.view.selected_rank, distribution.revealed - 1)
         token = distribution.token(selected)
         child = self.tree.child(self.view.node, selected)
-        self.pending.append((self.engine.advance((token,)), child))
-
+        command_id = self.engine.advance((token,))
         if child is None:
+            self._pending_unknown = command_id
             return False
 
+        self._pending_known.append((command_id, child))
         self.view = View(node=child)
         self._refresh_suggestion()
         return True
