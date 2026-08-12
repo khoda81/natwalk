@@ -22,7 +22,6 @@ class TreeLabelTests(unittest.TestCase):
             View(),
             rows,
             str,
-            selected_rank=-1,
             suggestion=None,
             max_preview_tokens=64,
         )
@@ -46,7 +45,6 @@ class TreeLabelTests(unittest.TestCase):
             View(),
             rows,
             str,
-            selected_rank=-1,
             suggestion=None,
             max_preview_tokens=0,
         )
