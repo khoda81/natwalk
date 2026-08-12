@@ -32,7 +32,6 @@ type DecodeTokens = Callable[[tuple[int, ...]], str]
 _KEY_POLL_SECONDS = 0.05
 _REDRAW_SECONDS = 0.25
 _REVEAL_PAGE = 128
-_REVEAL_PREFETCH = 32
 _SUGGESTION_STYLE = "1;38;5;45"
 _SELECTED_STYLE = "1;38;5;220"
 _FOREST_STYLE = "2;38;5;244"
@@ -279,14 +278,52 @@ def _row_preview(
     return tuple(tokens), tuple(separator_nats), len(tree[node].distribution) == 0
 
 
+def _unrevealed_forest_node(tree: Tree, row: CompactRow) -> NodeId | None:
+    """Return the distribution node when a forest row is only a replica boundary."""
+    if not row.forest:
+        return None
+
+    node = row.parent
+    if row.edges:
+        edge = row.edges[-1]
+        child = tree.child(edge.parent, edge.rank)
+        if child is None:
+            raise AssertionError("forest prefix must end at a discovered child")
+        node = child
+
+    distribution = tree[node].distribution
+    if row.forest_start < distribution.revealed or distribution.revealed >= len(distribution):
+        return None
+    return node
+
+
+def _viewport_reveal_demands(
+    tree: Tree,
+    rows: tuple[CompactRow, ...],
+    *,
+    tree_lines: int,
+) -> tuple[tuple[NodeId, int], ...]:
+    """Report replica prefixes needed before their transport boundary becomes visible."""
+    targets: dict[NodeId, int] = {}
+    reveal_span = max(_REVEAL_PAGE, 2 * tree_lines)
+    for row in rows:
+        node = _unrevealed_forest_node(tree, row)
+        if node is None:
+            continue
+        distribution = tree[node].distribution
+        stop = min(len(distribution), distribution.revealed + reveal_span)
+        targets[node] = max(targets.get(node, 0), stop)
+    return tuple(targets.items())
+
+
 def _tree_viewport(
     tree: Tree,
     view: View,
     *,
     selected: int,
     tree_lines: int,
-) -> tuple[int, int, tuple[CompactRow, ...]]:
-    """Choose partition rows while guaranteeing the selected root sibling is visible."""
+) -> tuple[int, int, tuple[CompactRow, ...], tuple[tuple[NodeId, int], ...]]:
+    """Choose visible rows and report replica data the near viewport will need."""
     roots_above = min(max(2, tree_lines // 8), selected - view.first_rank)
     start = max(view.first_rank, selected - roots_above)
 
@@ -310,7 +347,23 @@ def _tree_viewport(
         start = selected
         above, visible = visible_from(start)
 
-    return start, above, visible
+    reserve_above = int(above > 0)
+    probe = partition_rows(
+        tree,
+        view,
+        row_limit=max(0, 2 * tree_lines - reserve_above),
+        first_rank=start,
+    )
+    reveal_demands = _viewport_reveal_demands(
+        tree,
+        (*visible, *probe),
+        tree_lines=tree_lines,
+    )
+
+    # The unrevealed suffix is real probability mass but its current split point
+    # is transport state, not a semantic UI event. Keep ordinary aggregate forests.
+    visible = tuple(row for row in visible if _unrevealed_forest_node(tree, row) is None)
+    return start, above, visible, reveal_demands
 
 
 def _wrap_spans(
@@ -760,8 +813,8 @@ def _render(
     rewind_depth: int,
     engine_root: NodeId | None = None,
     pending_commands: int = 0,
-) -> None:
-    """Render one frame from replicated tree state without contacting the engine."""
+) -> tuple[tuple[NodeId, int], ...]:
+    """Render one frame and report replica reveal demand without contacting the engine."""
     columns, terminal_rows = _dimensions()
     color = sys.stdout.isatty()
     rule = "─" * columns
@@ -827,6 +880,7 @@ def _render(
     if lines is not None:
         tree_lines = min(tree_lines, max(2, lines))
 
+    reveal_demands: tuple[tuple[NodeId, int], ...] = ()
     distribution = tree[view.node].distribution
     if len(distribution) == 0:
         frame.append(_line("  ∅ terminal", columns))
@@ -834,7 +888,7 @@ def _render(
         frame.append(_line("  … unrevealed", columns))
     else:
         selected = min(view.selected_rank, distribution.revealed - 1)
-        start, above, visible = _tree_viewport(
+        start, above, visible, reveal_demands = _tree_viewport(
             tree,
             view,
             selected=selected,
@@ -931,6 +985,7 @@ def _render(
 
     frame.extend(footer)
     _write_frame(frame)
+    return reveal_demands
 
 
 class App:
@@ -1045,7 +1100,7 @@ class App:
     def render(self) -> None:
         self._refresh_suggestion()
         cursor = self.view.node
-        _render(
+        reveal_demands = _render(
             self.tree,
             cursor,
             self.engine.frontier,
@@ -1063,6 +1118,8 @@ class App:
             engine_root=self.root,
             pending_commands=len(self.pending),
         )
+        for node, stop in reveal_demands:
+            self.engine.reveal(node, stop)
         self.last_render = time.monotonic()
 
     def handle_keys(self, keys: tuple[str, ...]) -> bool:
@@ -1135,11 +1192,6 @@ class App:
             return False
 
         self.view = move(self.tree, self.view, 1)
-        if (
-            distribution.revealed < len(distribution)
-            and self.view.selected_rank >= distribution.revealed - _REVEAL_PREFETCH
-        ):
-            self.engine.reveal(self.view.node, distribution.revealed + _REVEAL_PAGE)
         return True
 
     def _rewind(self) -> bool:
