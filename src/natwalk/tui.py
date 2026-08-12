@@ -172,15 +172,15 @@ def _path_branch_column(tokens: tuple[int, ...], describe: DescribeToken) -> int
         return 0
 
     connector_width = _cell_width(_CONTINUATION_CONNECTOR)
-    if any(
-        _cell_width(connector) != connector_width
+    assert all(
+        _cell_width(connector) == connector_width
         for connector in (_BRANCH_CONNECTOR, _LAST_BRANCH_CONNECTOR)
-    ):
-        raise AssertionError("leading radix connectors must have one shared width")
+    ), "leading radix connectors must have one shared width"
 
     separator_width = _cell_width(_SEQUENCE_SEPARATOR)
-    if _cell_width(_BRANCH_SEPARATOR) != separator_width:
-        raise AssertionError("radix separators must have one shared width")
+    assert _cell_width(_BRANCH_SEPARATOR) == separator_width, (
+        "radix separators must have one shared width"
+    )
 
     junction = _BRANCH_SEPARATOR.index("┬")
     junction_offset = _cell_width(_BRANCH_SEPARATOR[:junction])
@@ -360,38 +360,20 @@ def _tree_viewport(
     tree: Tree,
     view: View,
     *,
-    selected: int,
     tree_lines: int,
 ) -> tuple[int, int, tuple[CompactRow, ...], tuple[tuple[NodeId, int], ...]]:
-    """Choose visible rows and report replica data the near viewport will need."""
-    roots_above = min(max(2, tree_lines // 8), selected - view.first_rank)
-    start = max(view.first_rank, selected - roots_above)
-
-    def visible_from(first_rank: int) -> tuple[int, tuple[CompactRow, ...]]:
-        above = first_rank - view.first_rank
-        reserve_above = int(above > 0)
-        row_budget = max(0, tree_lines - reserve_above)
-        rendered = partition_rows(
-            tree,
-            view,
-            row_limit=row_budget,
-            first_rank=first_rank,
-        )
-        return above, rendered
-
-    above, visible = visible_from(start)
-    selected_visible = any(
-        row.parent == view.node and row.rank == selected and not row.forest for row in visible
+    """Render the sibling suffix rooted at ``first_rank`` and prefetch its near future."""
+    start = view.first_rank
+    visible = partition_rows(
+        tree,
+        view,
+        row_limit=tree_lines,
+        first_rank=start,
     )
-    if not selected_visible and start != selected:
-        start = selected
-        above, visible = visible_from(start)
-
-    reserve_above = int(above > 0)
     probe = partition_rows(
         tree,
         view,
-        row_limit=max(0, 2 * tree_lines - reserve_above),
+        row_limit=2 * tree_lines,
         first_rank=start,
     )
     reveal_demands = _viewport_reveal_demands(
@@ -403,7 +385,7 @@ def _tree_viewport(
     # The unrevealed suffix is real probability mass but its current split point
     # is transport state, not a semantic UI event. Keep ordinary aggregate forests.
     visible = tuple(row for row in visible if _unrevealed_forest_node(tree, row) is None)
-    return start, above, visible, reveal_demands
+    return start, 0, visible, reveal_demands
 
 
 def _wrap_spans(
@@ -687,7 +669,6 @@ class _TreeRenderer:
         rows: tuple[CompactRow, ...],
         describe: DescribeToken,
         *,
-        selected_rank: int,
         suggestion: Suggestion | None,
         max_preview_tokens: int,
         above_nats: float | None = None,
@@ -698,7 +679,6 @@ class _TreeRenderer:
         self.view = view
         self.rows = rows
         self.describe = describe
-        self.selected_rank = selected_rank
         self.max_preview_tokens = max_preview_tokens
         self.suggested_edges = (
             set(suggestion_edges(tree, view.node, suggestion)) if suggestion else set()
@@ -914,7 +894,7 @@ def _read_key(timeout: float = _KEY_POLL_SECONDS) -> str | None:
 
         if sequence[-1] == ord("~"):
             break
-        if sequence.startswith(b"\x1b[<") and sequence[-1:] in {b"M", b"m"}:
+        if sequence.startswith(b"\x1b[<") and sequence[-1] in (ord("M"), ord("m")):
             break
 
     return _decode_escape(bytes(sequence)) or "ESC"
@@ -1037,11 +1017,9 @@ def _render(
     elif distribution.revealed == 0:
         frame.append(_line("  … unrevealed", columns))
     else:
-        selected = min(view.first_rank, distribution.revealed - 1)
         start, above, visible, reveal_demands = _tree_viewport(
             tree,
             view,
-            selected=selected,
             tree_lines=tree_lines,
         )
 
@@ -1054,7 +1032,6 @@ def _render(
             view,
             visible,
             describe,
-            selected_rank=selected,
             suggestion=suggestion,
             max_preview_tokens=min(max_tokens, 64),
             above_nats=above_nats,
@@ -1290,11 +1267,7 @@ class App:
         if rank == self.view.first_rank:
             return False
 
-        self.view = View(
-            node=self.view.node,
-            first_rank=rank,
-            selected_rank=rank,
-        )
+        self.view = View(node=self.view.node, first_rank=rank)
         return True
 
     def _scroll(self, delta: int) -> bool:
@@ -1342,11 +1315,7 @@ class App:
 
         command_id = self.engine.rewind()
         self._pending_known.append((command_id, node.parent))
-        self.view = View(
-            node=node.parent,
-            first_rank=node.rank,
-            selected_rank=node.rank,
-        )
+        self.view = View(node=node.parent, first_rank=node.rank)
         self._refresh_suggestion()
         return True
 
