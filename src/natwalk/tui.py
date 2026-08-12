@@ -161,10 +161,8 @@ def _path_branch_column(tokens: tuple[int, ...], describe: DescribeToken) -> int
     """Column where a branch after ``tokens`` meets its collapsed token edge."""
     if not tokens:
         return 0
-    # Measure the rendered geometry instead of duplicating its widths as arithmetic.
-    # `` · `` and `` ┬ `` have the same cell width, and ├─/└─ share one width too.
-    prefix = "├─" + " · ".join(describe(token) for token in tokens) + " "
-    return _cell_width(prefix)
+    token_width = sum(_cell_width(describe(token)) for token in tokens)
+    return 3 + token_width + 3 * (len(tokens) - 1)
 
 
 def _branch_prefixes(
