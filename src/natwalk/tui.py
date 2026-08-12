@@ -15,7 +15,14 @@ from collections.abc import Callable
 from contextlib import contextmanager
 
 from .engine import CommandId, CursorFactory, EngineClient
-from .query import Suggestion, completions, greedy
+from .query import (
+    Suggestion,
+    cycle_suggestion,
+    normalize_suggestion,
+    suggestion_complete,
+    suggestion_edges,
+    suggestion_tokens,
+)
 from .tree import NodeId, Tree
 from .view import CompactRow, View, forest_nats, move, partition_rows
 
@@ -507,24 +514,42 @@ def _row_branch_nats(tree: Tree, root: NodeId, display_nats: float, row: Compact
 
 def _row_token_styles(
     tree: Tree,
-    view: View,
     row: CompactRow,
-    suggestion: tuple[int, ...],
+    suggestion: set[Suggestion],
     *,
     selected: bool,
 ) -> tuple[str, ...]:
-    """Color compact-row tokens only from discrete UI state, never probability."""
-    prefix = list(tree.path_from(view.node, row.parent))
-    matches_suggestion = tuple(prefix) == suggestion[: len(prefix)]
-    styles: list[str] = []
+    """Color compact-row tokens from structural suggestion/UI state only."""
+    if row.ranks:
+        if len(row.ranks) != len(row.tokens):
+            raise ValueError("compact row rank count must match token count")
+        ranks = row.ranks
+    else:
+        node = row.parent
+        fallback: list[int] = []
+        for token in row.tokens:
+            distribution = tree[node].distribution
+            try:
+                rank = distribution.rank(token)
+            except ValueError as error:
+                raise ValueError("compact row token is not an edge of its parent") from error
+            fallback.append(rank)
+            child = tree.child(node, rank)
+            if child is None:
+                break
+            node = child
+        ranks = tuple(fallback)
+        if len(ranks) != len(row.tokens):
+            raise ValueError("compact row crosses an undiscovered child")
 
-    for token in row.tokens:
-        on_suggestion = (
-            matches_suggestion
-            and len(prefix) < len(suggestion)
-            and suggestion[len(prefix)] == token
-        )
-        if on_suggestion:
+    styles: list[str] = []
+    node = row.parent
+    for index, (token, rank) in enumerate(zip(row.tokens, ranks, strict=True)):
+        distribution = tree[node].distribution
+        if distribution.token(rank) != token:
+            raise ValueError("compact row rank does not identify its token edge")
+
+        if Suggestion(node, rank) in suggestion:
             style = _SUGGESTION_STYLE
         elif selected:
             style = _SELECTED_STYLE
@@ -533,8 +558,12 @@ def _row_token_styles(
         else:
             style = ""
         styles.append(style)
-        prefix.append(token)
-        matches_suggestion = on_suggestion
+
+        if index + 1 < len(row.tokens):
+            child = tree.child(node, rank)
+            if child is None:
+                raise ValueError("compact row crosses an undiscovered child")
+            node = child
 
     return tuple(styles)
 
@@ -808,36 +837,28 @@ def _render(
     context: str,
     decode_tokens: DecodeTokens | None,
     budget_nats: float,
-    completion_index: int,
+    suggestion: Suggestion | None,
     max_tokens: int,
     lines: int | None,
     debug: bool,
     rewind_depth: int,
     engine_root: NodeId | None = None,
     pending_commands: int = 0,
-) -> tuple[tuple[Suggestion, ...], int]:
+) -> None:
     """Render one frame from replicated tree state without contacting the engine."""
     columns, terminal_rows = _dimensions()
     color = sys.stdout.isatty()
     rule = "─" * columns
 
-    suggestions = completions(
+    suggested_tokens = suggestion_tokens(tree, view.node, suggestion)
+    suggested_edges = set(suggestion_edges(tree, view.node, suggestion)) if suggestion else set()
+    suggested_complete = suggestion_complete(
         tree,
         view.node,
+        suggestion,
         max_nats=budget_nats,
         max_tokens=max_tokens,
     )
-    if suggestions:
-        completion_index %= len(suggestions)
-        suggestion = suggestions[completion_index]
-    else:
-        completion_index = 0
-        suggestion = greedy(
-            tree,
-            view.node,
-            max_nats=budget_nats,
-            max_tokens=max_tokens,
-        )
 
     frame: list[str] = []
     frame.append(_paint(_line(title, columns), "1", color=color))
@@ -864,8 +885,8 @@ def _render(
     frame.append(_line(rule, columns))
     committed = tree.path(root)
     context_text = _context_text(context, describe, committed, decode_tokens)
-    suggestion_text = _sequence_text(describe, suggestion.tokens, decode_tokens)
-    if suggestion_text and not suggestion.complete:
+    suggestion_text = _sequence_text(describe, suggested_tokens, decode_tokens)
+    if suggestion_text and not suggested_complete:
         suggestion_text += "…"
     context_lines = _wrap_spans(
         _context_spans(context_text, suggestion_text, decode_tokens),
@@ -988,9 +1009,8 @@ def _render(
                     preview_complete=preview_complete,
                     token_styles=_row_token_styles(
                         tree,
-                        view,
                         row,
-                        suggestion.tokens,
+                        suggested_edges,
                         selected=row_selected,
                     ),
                 )
@@ -1000,7 +1020,6 @@ def _render(
     prefix = "\033[2J\033[H" if sys.stdout.isatty() else ""
     sys.stdout.write(prefix + "\n".join(frame) + "\n")
     sys.stdout.flush()
-    return suggestions, completion_index
 
 
 class App:
@@ -1037,12 +1056,12 @@ class App:
         self.lines = lines
 
         self.view = View(node=self.root)
-        self.completion_index = 0
-        self.suggestions: tuple[Suggestion, ...] = ()
+        self.suggestion: Suggestion | None = None
         self.pending: list[tuple[CommandId, NodeId | None]] = []
         self.debug = False
         self.quit_requested = False
         self.last_render = 0.0
+        self._refresh_suggestion()
 
     @property
     def tree(self) -> Tree:
@@ -1059,6 +1078,17 @@ class App:
     def navigation_blocked(self) -> bool:
         """Whether the last queued move ends at a child not yet present in the replica."""
         return bool(self.pending and self.pending[-1][1] is None)
+
+    def _refresh_suggestion(self) -> bool:
+        previous = self.suggestion
+        self.suggestion = normalize_suggestion(
+            self.tree,
+            self.view.node,
+            previous,
+            max_nats=self.budget_nats,
+            max_tokens=self.max_tokens,
+        )
+        return self.suggestion != previous
 
     def poll(self) -> bool:
         """Apply engine progress without snapping past the last queued navigation target."""
@@ -1077,7 +1107,6 @@ class App:
                 if completed + 1 != len(self.pending):
                     raise RuntimeError("unknown navigation target must be last in queue")
                 self.view = View(node=done.node)
-                self.completion_index = 0
                 changed = True
             completed += 1
 
@@ -1086,13 +1115,14 @@ class App:
 
         if not self.pending and self.view.node != self.root:
             self.view = View(node=self.root)
-            self.completion_index = 0
             changed = True
-        return changed
+
+        return self._refresh_suggestion() or changed
 
     def render(self) -> None:
+        self._refresh_suggestion()
         cursor = self.view.node
-        self.suggestions, self.completion_index = _render(
+        _render(
             self.tree,
             cursor,
             self.engine.frontier,
@@ -1102,7 +1132,7 @@ class App:
             context=self.context,
             decode_tokens=self.decode_tokens,
             budget_nats=self.budget_nats,
-            completion_index=self.completion_index,
+            suggestion=self.suggestion,
             max_tokens=self.max_tokens,
             lines=self.lines,
             debug=self.debug,
@@ -1131,17 +1161,31 @@ class App:
             return True
         if key == "[":
             self.budget_nats = max(0.0, self.budget_nats - self.budget_step)
-            self.completion_index = 0
+            self._refresh_suggestion()
             return True
         if key == "]":
             self.budget_nats += self.budget_step
-            self.completion_index = 0
+            self._refresh_suggestion()
             return True
-        if key == "TAB" and self.suggestions:
-            self.completion_index = (self.completion_index + 1) % len(self.suggestions)
+        if key == "TAB":
+            self.suggestion = cycle_suggestion(
+                self.tree,
+                self.view.node,
+                self.suggestion,
+                1,
+                max_nats=self.budget_nats,
+                max_tokens=self.max_tokens,
+            )
             return True
-        if key == "BACKTAB" and self.suggestions:
-            self.completion_index = (self.completion_index - 1) % len(self.suggestions)
+        if key == "BACKTAB":
+            self.suggestion = cycle_suggestion(
+                self.tree,
+                self.view.node,
+                self.suggestion,
+                -1,
+                max_nats=self.budget_nats,
+                max_tokens=self.max_tokens,
+            )
             return True
         if key == "UP":
             self.view = move(self.tree, self.view, -1)
@@ -1185,27 +1229,18 @@ class App:
         command_id = self.engine.rewind()
         self.pending.append((command_id, parent))
         self.view = View(node=parent)
-        self.completion_index = 0
+        self._refresh_suggestion()
         return True
 
     def _accept(self) -> bool:
         if self.pending:
             return False
-        suggestion = self._selected_suggestion()
-        if not suggestion.tokens:
+        self._refresh_suggestion()
+        tokens = suggestion_tokens(self.tree, self.view.node, self.suggestion)
+        if not tokens:
             return False
-        self.pending.append((self.engine.advance(suggestion.tokens), None))
+        self.pending.append((self.engine.advance(tokens), None))
         return False
-
-    def _selected_suggestion(self) -> Suggestion:
-        if self.suggestions:
-            return self.suggestions[self.completion_index % len(self.suggestions)]
-        return greedy(
-            self.tree,
-            self.view.node,
-            max_nats=self.budget_nats,
-            max_tokens=self.max_tokens,
-        )
 
     def _advance_selected(self) -> bool:
         if self.navigation_blocked:
@@ -1223,7 +1258,7 @@ class App:
             return False
 
         self.view = View(node=child)
-        self.completion_index = 0
+        self._refresh_suggestion()
         return True
 
 
