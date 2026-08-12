@@ -826,6 +826,15 @@ def _read_keys(timeout: float = _KEY_POLL_SECONDS) -> tuple[str, ...]:
     return tuple(keys)
 
 
+def _write_frame(frame: list[str]) -> None:
+    """Write one complete frame without scrolling past the terminal bottom."""
+    interactive = sys.stdout.isatty()
+    prefix = "\033[2J\033[H" if interactive else ""
+    suffix = "" if interactive else "\n"
+    sys.stdout.write(prefix + "\n".join(frame) + suffix)
+    sys.stdout.flush()
+
+
 def _render(
     tree: Tree,
     root: NodeId,
@@ -1017,9 +1026,7 @@ def _render(
             )
 
     frame.extend(footer)
-    prefix = "\033[2J\033[H" if sys.stdout.isatty() else ""
-    sys.stdout.write(prefix + "\n".join(frame) + "\n")
-    sys.stdout.flush()
+    _write_frame(frame)
 
 
 class App:
