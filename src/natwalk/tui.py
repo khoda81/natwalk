@@ -32,7 +32,6 @@ type DecodeTokens = Callable[[tuple[int, ...]], str]
 _KEY_POLL_SECONDS = 0.05
 _REDRAW_SECONDS = 0.25
 _REVEAL_PAGE = 128
-_REVEAL_PREFETCH = 32
 _SUGGESTION_STYLE = "1;38;5;45"
 _SELECTED_STYLE = "1;38;5;220"
 _FOREST_STYLE = "2;38;5;244"
@@ -311,6 +310,28 @@ def _tree_viewport(
         above, visible = visible_from(start)
 
     return start, above, visible
+
+
+def _viewport_reveal_target(
+    tree: Tree,
+    view: View,
+    *,
+    tree_lines: int,
+) -> int:
+    """Return the concrete rank horizon needed for this viewport plus one viewport ahead."""
+    distribution = tree[view.node].distribution
+    if distribution.revealed == 0:
+        return min(len(distribution), _REVEAL_PAGE)
+
+    selected = min(view.selected_rank, distribution.revealed - 1)
+    start, above, _visible = _tree_viewport(
+        tree,
+        view,
+        selected=selected,
+        tree_lines=tree_lines,
+    )
+    row_budget = max(0, tree_lines - int(above > 0))
+    return min(len(distribution), start + 2 * row_budget)
 
 
 def _wrap_spans(
@@ -760,7 +781,7 @@ def _render(
     rewind_depth: int,
     engine_root: NodeId | None = None,
     pending_commands: int = 0,
-) -> None:
+) -> int:
     """Render one frame from replicated tree state without contacting the engine."""
     columns, terminal_rows = _dimensions()
     color = sys.stdout.isatty()
@@ -931,6 +952,7 @@ def _render(
 
     frame.extend(footer)
     _write_frame(frame)
+    return tree_lines
 
 
 class App:
@@ -966,6 +988,7 @@ class App:
         self.budget_nats = budget_nats
         self.budget_step = budget_step
         self.lines = lines
+        self._tree_lines = max(2, lines) if lines is not None else 30
 
         self.view = View(node=self.root)
         self.suggestion: Suggestion | None = None
@@ -1045,7 +1068,7 @@ class App:
     def render(self) -> None:
         self._refresh_suggestion()
         cursor = self.view.node
-        _render(
+        self._tree_lines = _render(
             self.tree,
             cursor,
             self.engine.frontier,
@@ -1123,6 +1146,24 @@ class App:
             return self._advance_selected()
         return False
 
+    def _prefetch_viewport(self) -> None:
+        distribution = self.tree[self.view.node].distribution
+        if distribution.revealed >= len(distribution):
+            return
+
+        target = _viewport_reveal_target(
+            self.tree,
+            self.view,
+            tree_lines=self._tree_lines,
+        )
+        if target <= distribution.revealed:
+            return
+
+        self.engine.reveal(
+            self.view.node,
+            max(target, distribution.revealed + _REVEAL_PAGE),
+        )
+
     def _move_down(self) -> bool:
         distribution = self.tree[self.view.node].distribution
         if distribution.revealed == 0:
@@ -1130,16 +1171,11 @@ class App:
                 self.engine.reveal(self.view.node, _REVEAL_PAGE)
             return False
         if self.view.selected_rank >= distribution.revealed - 1:
-            if distribution.revealed < len(distribution):
-                self.engine.reveal(self.view.node, distribution.revealed + _REVEAL_PAGE)
+            self._prefetch_viewport()
             return False
 
         self.view = move(self.tree, self.view, 1)
-        if (
-            distribution.revealed < len(distribution)
-            and self.view.selected_rank >= distribution.revealed - _REVEAL_PREFETCH
-        ):
-            self.engine.reveal(self.view.node, distribution.revealed + _REVEAL_PAGE)
+        self._prefetch_viewport()
         return True
 
     def _rewind(self) -> bool:

@@ -6,6 +6,7 @@ import time
 import unittest
 from collections.abc import Sequence
 
+from natwalk.sync import ReplicaDistribution
 from natwalk.tree import Distribution, Edge, Tree
 from natwalk.tui import (
     _PREDICTION_STYLE,
@@ -453,6 +454,41 @@ class InteractiveAppTests(unittest.TestCase):
             self.assertEqual(app.view.selected_rank, 1)
         finally:
             app.engine.terminate()
+
+    def test_down_prefetch_depends_on_viewport_height(self) -> None:
+        def make_app(tree_lines: int):
+            probabilities = (0.001,) * 128
+            distribution = ReplicaDistribution(
+                1000,
+                tuple(range(128)),
+                probabilities,
+                1.0 - math.fsum(probabilities),
+            )
+            tree = Tree(distribution)
+
+            class RevealRecorder:
+                def __init__(self) -> None:
+                    self.tree = tree
+                    self.calls: list[tuple[int, int]] = []
+
+                def reveal(self, node: int, stop: int) -> None:
+                    self.calls.append((node, stop))
+
+            app = object.__new__(App)
+            app.engine = RevealRecorder()
+            app.view = View(selected_rank=31)
+            app._tree_lines = tree_lines
+            return app
+
+        short = make_app(8)
+        self.assertTrue(short._move_down())
+        self.assertEqual(short.view.selected_rank, 32)
+        self.assertEqual(short.engine.calls, [])
+
+        tall = make_app(64)
+        self.assertTrue(tall._move_down())
+        self.assertEqual(tall.view.selected_rank, 32)
+        self.assertEqual(tall.engine.calls, [(0, 256)])
 
     def test_right_and_left_move_model_search_and_view_root_together(self) -> None:
         app = App(

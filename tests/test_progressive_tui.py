@@ -44,7 +44,7 @@ def wait_for(app: App, predicate, timeout: float = 3.0) -> None:
 
 
 class ProgressiveTuiTests(unittest.TestCase):
-    def test_down_prefetches_next_rank_page_before_prefix_boundary(self) -> None:
+    def test_tall_viewport_prefetches_next_page_before_visible_boundary(self) -> None:
         app = App(
             wide_cursor,
             str,
@@ -54,16 +54,19 @@ class ProgressiveTuiTests(unittest.TestCase):
             max_tokens=8,
             budget_nats=1.0,
             budget_step=0.25,
-            lines=8,
+            lines=64,
         )
         try:
             distribution = app.tree[app.root].distribution
             self.assertEqual(len(distribution), 256)
             self.assertEqual(distribution.revealed, 128)
 
-            app.view = View(node=app.root, selected_rank=95)
+            # The selected rank itself is nowhere near the revealed boundary.
+            # A tall viewport nevertheless needs enough read-ahead to keep
+            # that boundary out of the ordinary scrolling window.
+            app.view = View(node=app.root, selected_rank=31)
             self.assertTrue(app.handle_key("DOWN"))
-            self.assertEqual(app.view.selected_rank, 96)
+            self.assertEqual(app.view.selected_rank, 32)
             self.assertEqual(distribution.revealed, 128)
 
             wait_for(app, lambda: distribution.revealed == 256)
