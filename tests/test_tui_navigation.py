@@ -58,7 +58,7 @@ class TreeNavigationTests(unittest.TestCase):
 
     def test_tree_renderer_has_no_selection_marker(self) -> None:
         tree = Tree(Distribution(tokens=(0, 1, 2), probabilities=(0.6, 0.3, 0.1)))
-        view = View(first_rank=1, selected_rank=1)
+        view = View(first_rank=1)
         rows = partition_rows(tree, view, row_limit=2)
         renderer = _TreeRenderer(
             tree,
@@ -66,7 +66,6 @@ class TreeNavigationTests(unittest.TestCase):
             view,
             rows,
             str,
-            selected_rank=1,
             suggestion=None,
             max_preview_tokens=0,
         )
@@ -98,7 +97,6 @@ class TreeNavigationTests(unittest.TestCase):
 
             self.assertTrue(app.handle_key("DOWN"))
             self.assertEqual(app.view.first_rank, 1)
-            self.assertEqual(app.view.selected_rank, 1)
 
             app.handle_key("RIGHT")
             wait_for_app(app, lambda: not app.pending and app.root != original_root)
@@ -107,11 +105,9 @@ class TreeNavigationTests(unittest.TestCase):
             app.handle_key("LEFT")
             wait_for_app(app, lambda: not app.pending and app.root == original_root)
             self.assertEqual(app.view.first_rank, 1)
-            self.assertEqual(app.view.selected_rank, 1)
 
             self.assertTrue(app.handle_key("HOME"))
             self.assertEqual(app.view.first_rank, 0)
-            self.assertEqual(app.view.selected_rank, 0)
 
             self.assertTrue(app.handle_key("END"))
             self.assertEqual(app.view.first_rank, 3)
