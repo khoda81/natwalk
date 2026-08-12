@@ -20,9 +20,7 @@ DEFAULT_MODEL = (
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     model = Path(
-        sys.argv[1]
-        if len(sys.argv) > 1
-        else os.environ.get("NATWALK_QWEN_MODEL", DEFAULT_MODEL)
+        sys.argv[1] if len(sys.argv) > 1 else os.environ.get("NATWALK_QWEN_MODEL", DEFAULT_MODEL)
     ).expanduser()
 
     if not model.is_file():
