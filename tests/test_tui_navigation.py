@@ -56,7 +56,7 @@ class TreeNavigationTests(unittest.TestCase):
         self.assertEqual(_decode_escape(b"\x1b[<65;10;20M"), "DOWN")
         self.assertEqual(_decode_escape(b"\x1b[<68;10;20M"), "UP")
 
-    def test_tree_renderer_has_no_selection_marker(self) -> None:
+    def test_scrolled_root_uses_branch_connector_without_selection_marker(self) -> None:
         tree = Tree(Distribution(tokens=(0, 1, 2), probabilities=(0.6, 0.3, 0.1)))
         view = View(first_rank=1)
         rows = partition_rows(tree, view, row_limit=2)
@@ -72,7 +72,7 @@ class TreeNavigationTests(unittest.TestCase):
 
         lines = renderer.render(columns=100, color=False)
 
-        self.assertTrue(lines[0].startswith("  ┬ 1"))
+        self.assertTrue(lines[0].startswith("  ├─1"))
         self.assertTrue(all("❯" not in line for line in lines))
 
     def test_scroll_right_back_and_home_share_one_viewport_rank(self) -> None:
