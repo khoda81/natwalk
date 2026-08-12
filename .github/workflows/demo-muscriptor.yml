@@ -1,0 +1,17 @@
+name: MuScriptor README demo
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  explain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain required environment
+        run: |
+          echo "The MuScriptor demo cannot currently be rendered on a stock GitHub-hosted runner."
+          echo "assets/demo-muscriptor.tape expects a sibling MuScriptor checkout, its sample audio/model assets, and CUDA."
+          echo "Render it from the repository root in that environment with: vhs assets/demo-muscriptor.tape"
