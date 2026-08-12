@@ -45,7 +45,7 @@ def wait_for(app: App, predicate, timeout: float = 3.0) -> None:
 
 
 class ProgressiveTuiTests(unittest.TestCase):
-    def test_viewport_prefetches_before_cursor_reaches_old_fixed_band(self) -> None:
+    def test_viewport_prefetches_before_old_fixed_band(self) -> None:
         app = App(
             wide_cursor,
             str,
@@ -62,12 +62,11 @@ class ProgressiveTuiTests(unittest.TestCase):
             self.assertEqual(len(distribution), 256)
             self.assertEqual(distribution.revealed, 128)
 
-            app.view = View(node=app.root, first_rank=70, selected_rank=70)
+            app.view = View(node=app.root, first_rank=70)
             self.assertLess(app.view.first_rank, distribution.revealed - 32)
             _start, _above, visible, reveal_demands = _tree_viewport(
                 app.tree,
                 app.view,
-                selected=app.view.first_rank,
                 tree_lines=50,
             )
 
@@ -105,7 +104,7 @@ class ProgressiveTuiTests(unittest.TestCase):
         try:
             distribution = app.tree[app.root].distribution
             self.assertEqual(distribution.revealed, 128)
-            app.view = View(node=app.root, first_rank=127, selected_rank=127)
+            app.view = View(node=app.root, first_rank=127)
 
             self.assertFalse(app.handle_key("DOWN"))
             wait_for(app, lambda: distribution.revealed == 256)
