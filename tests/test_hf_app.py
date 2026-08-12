@@ -18,9 +18,7 @@ def _load_hf_app():
     torch.float64 = object()
     torch.long = object()
     torch.cuda = types.SimpleNamespace(is_available=lambda: False)
-    torch.backends = types.SimpleNamespace(
-        mps=types.SimpleNamespace(is_available=lambda: False)
-    )
+    torch.backends = types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: False))
 
     transformers = types.ModuleType("transformers")
     transformers.AutoModelForCausalLM = type("AutoModelForCausalLM", (), {})
