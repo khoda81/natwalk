@@ -62,12 +62,12 @@ class ProgressiveTuiTests(unittest.TestCase):
             self.assertEqual(len(distribution), 256)
             self.assertEqual(distribution.revealed, 128)
 
-            app.view = View(node=app.root, selected_rank=70)
-            self.assertLess(app.view.selected_rank, distribution.revealed - 32)
+            app.view = View(node=app.root, first_rank=70, selected_rank=70)
+            self.assertLess(app.view.first_rank, distribution.revealed - 32)
             _start, _above, visible, reveal_demands = _tree_viewport(
                 app.tree,
                 app.view,
-                selected=app.view.selected_rank,
+                selected=app.view.first_rank,
                 tree_lines=50,
             )
 
@@ -105,13 +105,13 @@ class ProgressiveTuiTests(unittest.TestCase):
         try:
             distribution = app.tree[app.root].distribution
             self.assertEqual(distribution.revealed, 128)
-            app.view = View(node=app.root, selected_rank=127)
+            app.view = View(node=app.root, first_rank=127, selected_rank=127)
 
             self.assertFalse(app.handle_key("DOWN"))
             wait_for(app, lambda: distribution.revealed == 256)
 
             self.assertTrue(app.handle_key("DOWN"))
-            self.assertEqual(app.view.selected_rank, 128)
+            self.assertEqual(app.view.first_rank, 128)
         finally:
             app.engine.terminate()
 
