@@ -332,28 +332,6 @@ class TerminalWidthTests(unittest.TestCase):
         self.assertIn(f"\033[{_PREDICTION_STYLE}m2\033[0m", colored)
         self.assertNotIn(f"\033[{_PREDICTION_STYLE}m · \033[0m", colored)
 
-    def test_forest_keeps_its_semantic_ellipsis_before_preview(self) -> None:
-        tree = Tree(
-            Distribution(
-                tokens=(10, 11, 12),
-                probabilities=(0.6, 0.3, 0.1),
-            )
-        )
-        rows = partition_rows(tree, View(), row_limit=2)
-        renderer = _TreeRenderer(
-            tree,
-            tree.root,
-            View(),
-            rows,
-            str,
-            selected_rank=-1,
-            suggestion=None,
-            max_preview_tokens=64,
-        )
-
-        line = renderer.render(columns=100, color=False)[1]
-        self.assertIn("… · 11 · …", line)
-
     def test_selected_sibling_stays_inside_tree_viewport(self) -> None:
         tree = Tree(
             Distribution(

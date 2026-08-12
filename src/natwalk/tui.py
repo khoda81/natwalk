@@ -790,9 +790,7 @@ class _TreeRenderer:
                 zip(tokens[1:], token_styles[1:], separator_nats, strict=True),
                 start=1,
             ):
-                separator = (
-                    _BRANCH_SEPARATOR if index in inline_branches else _SEQUENCE_SEPARATOR
-                )
+                separator = _BRANCH_SEPARATOR if index in inline_branches else _SEQUENCE_SEPARATOR
                 spans.extend(
                     (
                         (separator, _grayscale(math.exp(-token_nats))),
