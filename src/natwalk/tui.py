@@ -356,7 +356,8 @@ def _viewport_reveal_demands(
     return tuple(targets.items())
 
 
-def _tree_viewport(    tree: Tree,
+def _tree_viewport(
+    tree: Tree,
     view: View,
     *,
     selected: int,
@@ -800,9 +801,7 @@ class _TreeRenderer:
             spans.append((token_text, _PREDICTION_STYLE))
 
         separator = _BRANCH_SEPARATOR if len(tokens) in inline_branches else _SEQUENCE_SEPARATOR
-        separator_style = _grayscale(
-            _relative_probability(row.path_nats, self.branch_reference)
-        )
+        separator_style = _grayscale(_relative_probability(row.path_nats, self.branch_reference))
 
         if preview.tokens and not preview.complete:
             separator_style = _grayscale(math.exp(-preview.separator_nats[-1]))
@@ -1320,7 +1319,11 @@ class App:
         target = self.view.first_rank + direction * max(1, page)
 
         distribution = self.tree[self.view.node].distribution
-        if direction > 0 and target >= distribution.revealed and distribution.revealed < len(distribution):
+        if (
+            direction > 0
+            and target >= distribution.revealed
+            and distribution.revealed < len(distribution)
+        ):
             stop = min(
                 len(distribution),
                 max(distribution.revealed + _REVEAL_PAGE, target + 1),
