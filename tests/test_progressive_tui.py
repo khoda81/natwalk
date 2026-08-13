@@ -64,7 +64,7 @@ class ProgressiveTuiTests(unittest.TestCase):
 
             app.view = View(node=app.root, first_rank=70)
             self.assertLess(app.view.first_rank, distribution.revealed - 32)
-            _start, _above, visible, reveal_demands = _tree_viewport(
+            visible, reveal_demands = _tree_viewport(
                 app.tree,
                 app.view,
                 tree_lines=50,
