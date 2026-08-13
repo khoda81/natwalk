@@ -64,8 +64,6 @@ class CompactRow:
     """
 
     parent: NodeId
-    rank: int
-    depth: int
     ancestors: tuple[AncestorConnector, ...]
     is_last: bool
     edges: tuple[Edge, ...]
@@ -76,14 +74,6 @@ class CompactRow:
     forest_count: int = 0
     forest_start: int = 0
     branch_role: BranchRole = BranchRole.SIBLING
-
-    @property
-    def ancestor_last(self) -> tuple[bool, ...]:
-        return tuple(connector.is_last for connector in self.ancestors)
-
-    @property
-    def ancestor_nats(self) -> tuple[float, ...]:
-        return tuple(connector.nats for connector in self.ancestors)
 
     @property
     def ranks(self) -> tuple[int, ...]:
@@ -304,7 +294,8 @@ def _partition_branch(
     prefix_edges: tuple[Edge, ...],
     base_nats: float,
 ) -> _ConcreteEvent:
-    distribution = tree[parent].distribution
+    distribution = tree[parent]
+    distribution = distribution.distribution
     if not 0 <= rank < distribution.revealed:
         raise IndexError(f"rank {rank} has not been revealed")
     return _ConcreteEvent(
@@ -484,7 +475,6 @@ def _partition_layout_rows(
     children = _partition_children(events)
     edge_nats = _partition_edge_nats(events)
     branch_prefixes = {prefix for prefix, siblings in children.items() if len(siblings) > 1}
-    represented_roots: set[int] = set()
     rows_out: list[CompactRow] = []
     previous: _PartitionEvent | None = None
 
@@ -514,18 +504,6 @@ def _partition_layout_rows(
             else BranchRole.SIBLING
         )
 
-        if event.ranks:
-            root_rank = event.ranks[0]
-        elif isinstance(event, _ForestEvent):
-            root_rank = event.start
-        else:
-            raise AssertionError("concrete partition event has no edge")
-
-        representative_rank = -1
-        if isinstance(event, _ConcreteEvent) and root_rank not in represented_roots:
-            representative_rank = root_rank
-            represented_roots.add(root_rank)
-
         if isinstance(event, _ForestEvent):
             forest_count = event.end - event.start
             forest_start = event.start
@@ -540,8 +518,6 @@ def _partition_layout_rows(
         rows_out.append(
             CompactRow(
                 parent=parent,
-                rank=representative_rank,
-                depth=len(ancestors),
                 ancestors=ancestors,
                 is_last=is_last,
                 edges=event.edges[common:],
