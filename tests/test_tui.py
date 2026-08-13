@@ -194,7 +194,6 @@ class TerminalWidthTests(unittest.TestCase):
         )
         row = CompactRow(
             parent=0,
-            ancestors=(),
             is_last=False,
             edges=(Edge(0, 0), Edge(child, 0)),
             edge_nats=-math.log(0.6),
@@ -221,7 +220,6 @@ class TerminalWidthTests(unittest.TestCase):
         )
         row = CompactRow(
             parent=tree.root,
-            ancestors=(),
             is_last=True,
             edges=(Edge(tree.root, 0),),
             edge_nats=0.0,

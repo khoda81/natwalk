@@ -14,6 +14,7 @@ import unicodedata
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import cache
 
 from .engine import CommandId, CursorFactory, EngineClient
 from .query import (
@@ -179,76 +180,6 @@ def _minimum_finite(values) -> float:
     return min(finite) if finite else math.inf
 
 
-def _path_branch_column(tokens: tuple[int, ...], describe: DescribeToken) -> int:
-    """Column where a branch after ``tokens`` meets its collapsed token edge."""
-    if not tokens:
-        return 0
-    token_width = sum(_cell_width(describe(token)) for token in tokens)
-    return (
-        _CONNECTOR_WIDTH
-        + token_width
-        + _SEPARATOR_WIDTH * (len(tokens) - 1)
-        + _BRANCH_JUNCTION_OFFSET
-    )
-
-
-def _branch_prefixes(
-    tree: Tree,
-    view: View,
-    rows: tuple[CompactRow, ...],
-) -> set[tuple[int, ...]]:
-    """Return concrete token prefixes that own a visible radix branch."""
-    return {
-        tree.path_from(view.node, row.parent)
-        for row in rows
-        if row.branch_role is BranchRole.SIBLING
-    }
-
-
-def _row_branch_columns(
-    tree: Tree,
-    view: View,
-    row: CompactRow,
-    branch_prefixes: set[tuple[int, ...]],
-    describe: DescribeToken,
-) -> tuple[tuple[int, ...], int]:
-    """Align visible radix connectors with exact token-boundary columns."""
-    prefix = tree.path_from(view.node, row.parent)
-    ancestor_prefixes = tuple(
-        sorted(
-            (
-                candidate
-                for candidate in branch_prefixes
-                if len(candidate) < len(prefix) and prefix[: len(candidate)] == candidate
-            ),
-            key=len,
-        )
-    )
-    if len(ancestor_prefixes) != len(row.ancestors):
-        raise ValueError("radix ancestor paths must match connector state")
-    return (
-        tuple(_path_branch_column(candidate, describe) for candidate in ancestor_prefixes),
-        _path_branch_column(prefix, describe),
-    )
-
-
-def _row_inline_branches(
-    tree: Tree,
-    view: View,
-    row: CompactRow,
-    branch_prefixes: set[tuple[int, ...]],
-) -> tuple[int, ...]:
-    """Return token-boundary offsets that branch again later in the partition."""
-    prefix = tree.path_from(view.node, row.parent)
-    tokens = row_tokens(tree, row)
-    full_path = (*prefix, *tokens)
-    return tuple(
-        offset
-        for offset in range(1, len(tokens) + 1)
-        if full_path[: len(prefix) + offset] in branch_prefixes
-    )
-
-
 def _row_separator_nats(tree: Tree, row: CompactRow) -> tuple[float, ...]:
     """Return local surprisal for each collapsed token boundary."""
     return tuple(tree[edge.parent].distribution.nats(edge.rank) for edge in row.edges[1:])
@@ -323,8 +254,7 @@ def _unrevealed_forest_node(tree: Tree, row: CompactRow) -> NodeId | None:
     if row.edges:
         edge = row.edges[-1]
         child = tree.child(edge.parent, edge.rank)
-        if child is None:
-            raise AssertionError("forest prefix must end at a discovered child")
+        assert child is not None
         node = child
 
     distribution = tree[node].distribution
@@ -533,8 +463,7 @@ def _paint_spans(spans: tuple[_StyledSpan, ...], *, color: bool) -> str:
 
 
 def _styled_cell_spans(cells: list[str], styles: list[str]) -> tuple[_StyledSpan, ...]:
-    if len(cells) != len(styles):
-        raise ValueError("cell and style counts must match")
+    assert len(cells) == len(styles)
     spans: list[_StyledSpan] = []
     for cell, style in zip(cells, styles, strict=True):
         if spans and spans[-1][1] == style:
@@ -550,40 +479,6 @@ def _branch_text(row: CompactRow) -> str:
     if row.branch_role is BranchRole.CONTINUATION:
         return _CONTINUATION_CONNECTOR
     return _LAST_BRANCH_CONNECTOR if row.is_last else _BRANCH_CONNECTOR
-
-
-def _structure_spans(
-    row: CompactRow,
-    *,
-    branch_column: int,
-    ancestor_columns: tuple[int, ...],
-    branch_reference: float,
-) -> tuple[_StyledSpan, ...]:
-    """Lay out one row's semantic connectors in terminal-cell coordinates."""
-    if len(ancestor_columns) != len(row.ancestors):
-        raise ValueError("ancestor column count must match tree depth")
-
-    branch = _branch_text(row)
-    if any(_cell_width(char) != 1 for char in branch):
-        raise ValueError("tree connector glyphs must occupy one cell per character")
-
-    width = branch_column + _cell_width(branch)
-    cells = [" "] * width
-    styles = [""] * width
-
-    for connector, column in zip(row.ancestors, ancestor_columns, strict=True):
-        if connector.is_last:
-            continue
-        if not 0 <= column < width:
-            raise ValueError("ancestor connector must precede child branch")
-        cells[column] = "│"
-        styles[column] = _grayscale(_relative_probability(connector.nats, branch_reference))
-
-    glyph_style = _grayscale(_relative_probability(row.edge_nats, branch_reference))
-    for offset, char in enumerate(branch):
-        cells[branch_column + offset] = char
-        styles[branch_column + offset] = glyph_style
-    return _styled_cell_spans(cells, styles)
 
 
 @dataclass(frozen=True, slots=True)
@@ -658,8 +553,32 @@ class _TreeRenderer:
         self.suggested_edges = (
             set(suggestion_edges(tree, view.node, suggestion)) if suggestion else set()
         )
-        self.branch_prefixes = _branch_prefixes(tree, view, rows)
+        self.branch_nodes = {row.parent for row in rows if row.branch_role is BranchRole.SIBLING}
         self.view_base_nats = tree.path_nats(view.node, ancestor=root)
+
+        tree_ref = tree
+        view_node = view.node
+        describe_ref = describe
+
+        @cache
+        def node_geometry(node: NodeId) -> tuple[int, float]:
+            """Return branch column and view-relative path surprisal for one node."""
+            if node == view_node:
+                return 0, 0.0
+
+            item = tree_ref[node]
+            parent = item.parent
+            assert parent is not None
+            parent_column, parent_nats = node_geometry(parent)
+            token_width = _cell_width(describe_ref(tree_ref.token(node)))
+            column = (
+                _CONNECTOR_WIDTH + token_width + _BRANCH_JUNCTION_OFFSET
+                if parent == view_node
+                else parent_column + _SEPARATOR_WIDTH + token_width
+            )
+            return column, parent_nats + tree_ref.edge_nats(node)
+
+        self._node_geometry = node_geometry
 
         display_nats = [self.view_base_nats + row.path_nats for row in rows]
         branch_nats = [row.edge_nats for row in rows]
@@ -672,22 +591,74 @@ class _TreeRenderer:
             for row in self.rows
         )
 
+    def _ancestor_children(self, node: NodeId) -> tuple[NodeId, ...]:
+        """Return child endpoints of visible ancestor branch edges."""
+        children: list[NodeId] = []
+        current = node
+        while current != self.view.node:
+            item = self.tree[current]
+            parent = item.parent
+            assert parent is not None
+            if parent in self.branch_nodes:
+                children.append(current)
+            current = parent
+        children.reverse()
+        return tuple(children)
+
+    def _structure_spans(self, row: CompactRow) -> tuple[_StyledSpan, ...]:
+        """Lay out one row's structural connectors directly from the tree."""
+        branch_column, _ = self._node_geometry(row.parent)
+        branch = _branch_text(row)
+        assert all(_cell_width(char) == 1 for char in branch)
+
+        width = branch_column + _cell_width(branch)
+        cells = [" "] * width
+        styles = [""] * width
+
+        for child in self._ancestor_children(row.parent):
+            item = self.tree[child]
+            parent = item.parent
+            assert parent is not None
+            if item.rank == len(self.tree[parent].distribution) - 1:
+                continue
+
+            column, _ = self._node_geometry(parent)
+            _, nats = self._node_geometry(child)
+            assert 0 <= column < width
+            cells[column] = "│"
+            styles[column] = _grayscale(_relative_probability(nats, self.branch_reference))
+
+        glyph_style = _grayscale(_relative_probability(row.edge_nats, self.branch_reference))
+        for offset, char in enumerate(branch):
+            cells[branch_column + offset] = char
+            styles[branch_column + offset] = glyph_style
+        return _styled_cell_spans(cells, styles)
+
+    def _inline_branches(self, row: CompactRow) -> set[int]:
+        """Return token offsets whose endpoint is another visible branch point."""
+        branches = {
+            index
+            for index, edge in enumerate(row.edges[1:], start=1)
+            if edge.parent in self.branch_nodes
+        }
+        if not row.edges:
+            return branches
+
+        if row.forest:
+            last = row.edges[-1]
+            endpoint = self.tree.child(last.parent, last.rank)
+            assert endpoint is not None
+        else:
+            endpoint = row.child
+
+        if endpoint is not None and endpoint in self.branch_nodes:
+            branches.add(len(row.edges))
+        return branches
+
     def _layout_row(self, row: CompactRow) -> _TreeRowLayout:
-        ancestor_columns, branch_column = _row_branch_columns(
-            self.tree,
-            self.view,
-            row,
-            self.branch_prefixes,
-            self.describe,
-        )
         display_nats = self.view_base_nats + row.path_nats
         return _TreeRowLayout(
-            structure=_structure_spans(
-                row,
-                branch_column=branch_column,
-                ancestor_columns=ancestor_columns,
-                branch_reference=self.branch_reference,
-            ),
+            structure=self._structure_spans(row),
             label=self._label_spans(row),
             suffix=(
                 f"  {display_nats:7.3f} nat",
@@ -704,19 +675,10 @@ class _TreeRenderer:
             row,
             max_tokens=self.max_preview_tokens,
         )
-        inline_branches = set(
-            _row_inline_branches(
-                self.tree,
-                self.view,
-                row,
-                self.branch_prefixes,
-            )
-        )
+        inline_branches = self._inline_branches(row)
 
-        if len(token_styles) != len(tokens):
-            raise AssertionError("token styles must follow compact-row edges")
-        if len(separator_nats) != max(0, len(tokens) - 1):
-            raise AssertionError("separator costs must follow compact-row edges")
+        assert len(token_styles) == len(tokens)
+        assert len(separator_nats) == max(0, len(tokens) - 1)
 
         spans: list[_StyledSpan] = []
         if tokens:

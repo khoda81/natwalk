@@ -133,11 +133,7 @@ class ViewTests(unittest.TestCase):
         )
         self.assertEqual([row_tokens(tree, row) for row in visible], [(0, 0, 0), (1,), (1,), (1,)])
         self.assertEqual([row.ranks for row in visible], [(0, 0, 0), (1,), (1,), (1,)])
-        self.assertEqual([len(row.ancestors) for row in visible], [0, 2, 1, 0])
         self.assertEqual(visible[1].parent, second)
-        self.assertEqual(len(visible[1].ancestors), 2)
-        self.assertAlmostEqual(visible[1].ancestors[0].nats, -math.log(0.6))
-        self.assertAlmostEqual(visible[1].ancestors[1].nats, -math.log(0.6 * 0.8))
 
     def test_enter_requires_discovered_child(self) -> None:
         tree = Tree(distribution(0.5, 0.3, 0.2))

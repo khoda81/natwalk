@@ -42,29 +42,20 @@ class BranchRole(Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class AncestorConnector:
-    """One visible radix ancestor connector and its exact aggregate surprisal."""
-
-    is_last: bool
-    nats: float
-
-
-@dataclass(frozen=True, slots=True)
 class CompactRow:
     """One physical row for one event in the visible probability partition.
 
-    ``edges`` is the structural radix suffix not already factored by earlier
-    rows. Token ids and edge costs are derived from those edges and the tree.
-    ``path_nats`` is the exact event surprisal from the view root. ``edge_nats``
-    is the aggregate surprisal of the displayed branch from the view root, used
-    only to shade its connector. ``ancestors`` keeps each visible ancestor
-    connector's shape and aggregate surprisal as one value. ``branch_role``
-    distinguishes the partition's continuing spine from an ordinary sibling;
-    screen coordinates never determine that semantic role.
+    ``parent`` identifies the row's structural branch point. ``edges`` is the
+    structural radix suffix not already factored by earlier rows. Token ids and
+    edge costs are derived from those edges and the tree. ``path_nats`` is the
+    exact event surprisal from the view root. ``edge_nats`` is the aggregate
+    surprisal of the displayed branch from the view root, used only to shade
+    its connector. ``branch_role`` distinguishes the partition's continuing
+    spine from an ordinary sibling; screen coordinates never determine that
+    semantic role.
     """
 
     parent: NodeId
-    ancestors: tuple[AncestorConnector, ...]
     is_last: bool
     edges: tuple[Edge, ...]
     edge_nats: float
@@ -119,7 +110,6 @@ class _ForestEvent:
 
 
 type _PartitionEvent = _ConcreteEvent | _ForestEvent
-
 
 type _SuffixMassCache = dict[NodeId, tuple[float, ...]]
 
@@ -193,8 +183,7 @@ def _suffix_mass(
 ) -> float:
     """Return ``P(rank >= start)`` from one backward-built revealed suffix table."""
     distribution = tree[parent].distribution
-    if not 0 <= start <= distribution.revealed:
-        raise IndexError(f"suffix start {start} has not been revealed")
+    assert 0 <= start <= distribution.revealed
 
     suffix = cache.get(parent)
     if suffix is None:
@@ -295,8 +284,7 @@ def _partition_branch(
     base_nats: float,
 ) -> _ConcreteEvent:
     distribution = tree[parent].distribution
-    if not 0 <= rank < distribution.revealed:
-        raise IndexError(f"rank {rank} has not been revealed")
+    assert 0 <= rank < distribution.revealed
     return _ConcreteEvent(
         edges=(*prefix_edges, Edge(parent, rank)),
         nats=base_nats + distribution.nats(rank),
@@ -316,8 +304,7 @@ def _partition_range(
     range_nats: float | None = None,
 ) -> _PartitionEvent:
     distribution = tree[parent].distribution
-    if not 0 <= start < end <= len(distribution):
-        raise IndexError((start, end))
+    assert 0 <= start < end <= len(distribution)
     if end - start == 1:
         return _partition_branch(
             tree,
@@ -458,8 +445,7 @@ def _partition_node(tree: Tree, root: NodeId, ranks: tuple[int, ...]) -> NodeId:
     node = root
     for rank in ranks:
         child = tree.child(node, rank)
-        if child is None:
-            raise ValueError("partition prefix crosses an undiscovered edge")
+        assert child is not None
         node = child
     return node
 
@@ -473,7 +459,6 @@ def _partition_layout_rows(
 ) -> tuple[CompactRow, ...]:
     children = _partition_children(events)
     edge_nats = _partition_edge_nats(events)
-    branch_prefixes = {prefix for prefix, siblings in children.items() if len(siblings) > 1}
     rows_out: list[CompactRow] = []
     previous: _PartitionEvent | None = None
 
@@ -481,17 +466,6 @@ def _partition_layout_rows(
         common = 0 if previous is None else _common_prefix(previous.ranks, event.ranks)
         common_ranks = event.ranks[:common]
         parent = _partition_node(tree, root, common_ranks)
-
-        ancestor_prefixes = tuple(
-            event.ranks[:depth] for depth in range(common) if event.ranks[:depth] in branch_prefixes
-        )
-        ancestors = tuple(
-            AncestorConnector(
-                is_last=event.ranks[len(prefix)] == children[prefix][-1],
-                nats=edge_nats[(prefix, event.ranks[len(prefix)])],
-            )
-            for prefix in ancestor_prefixes
-        )
 
         branch_prefix = common_ranks
         branch_child = _partition_child_key(event, common)
@@ -517,7 +491,6 @@ def _partition_layout_rows(
         rows_out.append(
             CompactRow(
                 parent=parent,
-                ancestors=ancestors,
                 is_last=is_last,
                 edges=event.edges[common:],
                 edge_nats=branch_nats,
