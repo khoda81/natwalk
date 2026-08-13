@@ -294,8 +294,7 @@ def _partition_branch(
     prefix_edges: tuple[Edge, ...],
     base_nats: float,
 ) -> _ConcreteEvent:
-    distribution = tree[parent]
-    distribution = distribution.distribution
+    distribution = tree[parent].distribution
     if not 0 <= rank < distribution.revealed:
         raise IndexError(f"rank {rank} has not been revealed")
     return _ConcreteEvent(
