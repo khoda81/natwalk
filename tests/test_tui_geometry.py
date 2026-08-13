@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from natwalk.tree import Distribution, Tree
-from natwalk.tui import _cell_width, _path_branch_column, _TreeRenderer
+from natwalk.tui import _cell_width, _TreeRenderer
 from natwalk.view import BranchRole, View, partition_rows
 
 
@@ -71,11 +71,29 @@ class TreeGeometryTests(unittest.TestCase):
         self.assertTrue(lines[2].startswith("  └─1"))
 
     def test_branch_column_uses_unicode_terminal_cells(self) -> None:
+        tree = Tree(Distribution(tokens=(1,), probabilities=(1.0,)))
+        first = tree.put_child(
+            tree.root,
+            0,
+            Distribution(tokens=(2,), probabilities=(1.0,)),
+        )
+        second = tree.put_child(first, 0, Distribution((), ()))
         labels = {1: "界", 2: "e\u0301"}
+        renderer = _TreeRenderer(
+            tree,
+            tree.root,
+            View(),
+            (),
+            labels.__getitem__,
+            suggestion=None,
+            max_preview_tokens=0,
+        )
+
+        column, _nats = renderer._node_geometry(second)
 
         # 2 connector cells + 2 wide-character cells + 3 separator cells
         # + 1 combining-character label cell + 1 cell to the junction.
-        self.assertEqual(_path_branch_column((1, 2), labels.__getitem__), 9)
+        self.assertEqual(column, 9)
         self.assertEqual(_cell_width(labels[1]), 2)
         self.assertEqual(_cell_width(labels[2]), 1)
 
