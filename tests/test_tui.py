@@ -16,10 +16,8 @@ from natwalk.tui import (
     _context_spans,
     _context_text,
     _fit,
-    _format_forest_summary,
     _format_tree_row,
     _relative_probability,
-    _row_display_nats,
     _row_preview,
     _row_separator_nats,
     _tree_viewport,
@@ -102,7 +100,6 @@ class TerminalWidthTests(unittest.TestCase):
 
     def test_tree_row_never_exceeds_terminal_width(self) -> None:
         layout = _TreeRowLayout(
-            marker=("❯ ", ""),
             structure=(("│   │       ├─", ""),),
             label=(("program_119 · C♯7 · " + "界" * 10, ""),),
             suffix=("   13.506 nat", ""),
@@ -115,7 +112,6 @@ class TerminalWidthTests(unittest.TestCase):
 
     def test_colored_tree_structure_does_not_move_nat_column(self) -> None:
         layout = _TreeRowLayout(
-            marker=("  ", ""),
             structure=(("│       ├─", "38;5;244"),),
             label=(("1 · 2", "1;38;5;220"),),
             suffix=("    3.500 nat", "38;5;241"),
@@ -126,17 +122,6 @@ class TerminalWidthTests(unittest.TestCase):
 
         self.assertEqual(_ANSI.sub("", colored), plain)
         self.assertTrue(plain.endswith("    3.500 nat"))
-
-    def test_forest_summary_never_exceeds_terminal_width(self) -> None:
-        for columns in (24, 40, 80, 180):
-            line = _format_forest_summary(
-                "↓",
-                151_908,
-                2.75,
-                columns=columns,
-                color=False,
-            )
-            self.assertLessEqual(_cell_width(line), columns)
 
     def test_context_wrap_keeps_suggestion_span_intact(self) -> None:
         lines = _wrap_spans(
@@ -188,29 +173,6 @@ class TerminalWidthTests(unittest.TestCase):
         self.assertAlmostEqual(_relative_probability(3.0, 2.0), math.exp(-1.0))
         self.assertEqual(_relative_probability(math.inf, 2.0), 0.0)
 
-    def test_row_number_stays_relative_to_committed_root(self) -> None:
-        root = Distribution(tokens=(10,), probabilities=(0.5,))
-        tree = Tree(root)
-        child = tree.put_child(0, 0, Distribution(tokens=(20,), probabilities=(0.8,)))
-        view = View(node=child)
-        row = CompactRow(
-            parent=child,
-            rank=0,
-            depth=0,
-            ancestors=(),
-            is_last=True,
-            edges=(Edge(child, 0),),
-            edge_nats=-math.log(0.8),
-            path_nats=-math.log(0.8),
-            child=None,
-            open_ended=True,
-        )
-
-        self.assertAlmostEqual(
-            _row_display_nats(tree, tree.root, view, row),
-            -math.log(0.5) - math.log(0.8),
-        )
-
     def test_separator_nats_use_known_radix_ranks_without_token_search(self) -> None:
         class NoIndexTuple(tuple):
             def index(self, *_args, **_kwargs):
@@ -232,8 +194,6 @@ class TerminalWidthTests(unittest.TestCase):
         )
         row = CompactRow(
             parent=0,
-            rank=0,
-            depth=0,
             ancestors=(),
             is_last=False,
             edges=(Edge(0, 0), Edge(child, 0)),
@@ -261,8 +221,6 @@ class TerminalWidthTests(unittest.TestCase):
         )
         row = CompactRow(
             parent=tree.root,
-            rank=0,
-            depth=0,
             ancestors=(),
             is_last=True,
             edges=(Edge(tree.root, 0),),
@@ -275,11 +233,7 @@ class TerminalWidthTests(unittest.TestCase):
 
         preview = _row_preview(tree, row)
 
-        self.assertEqual(preview.tokens, (20, 30))
-        self.assertEqual(
-            preview.separator_nats,
-            (-math.log(0.75), -math.log(1.0)),
-        )
+        self.assertEqual(preview.edges, (Edge(first, 0), Edge(second, 0)))
         self.assertFalse(preview.complete)
         self.assertEqual(len(tree.nodes), before)
         self.assertIsNone(tree.child(second, 0))
@@ -295,8 +249,7 @@ class TerminalWidthTests(unittest.TestCase):
 
         preview = _row_preview(tree, forest)
 
-        self.assertEqual(preview.tokens, (11,))
-        self.assertEqual(preview.separator_nats, (-math.log(0.3),))
+        self.assertEqual(preview.edges, (Edge(tree.root, 1),))
         self.assertFalse(preview.complete)
 
     def test_preview_replaces_open_ended_ellipsis_and_dims_only_nodes(self) -> None:
@@ -348,17 +301,20 @@ class TerminalWidthTests(unittest.TestCase):
         )
         view = View(first_rank=1)
 
-        start, above, visible, reveal_demands = _tree_viewport(
+        visible, reveal_demands = _tree_viewport(
             tree,
             view,
             tree_lines=8,
         )
 
-        self.assertEqual(start, 1)
-        self.assertEqual(above, 0)
         self.assertEqual(reveal_demands, ())
         self.assertTrue(
-            any(row.parent == tree.root and row.rank == 1 and not row.forest for row in visible)
+            any(
+                row.parent == tree.root
+                and row.edges[:1] == (Edge(tree.root, 1),)
+                and not row.forest
+                for row in visible
+            )
         )
 
 
