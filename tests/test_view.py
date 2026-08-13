@@ -22,7 +22,7 @@ class ViewTests(unittest.TestCase):
         tree = Tree(distribution(0.5, 0.3, 0.15, 0.05))
         before = len(tree.nodes)
 
-        visible = rows(tree, View(node=0, first_rank=2, selected_rank=2), limit=20)
+        visible = rows(tree, View(node=0, first_rank=2), limit=20)
 
         self.assertEqual([row.rank for row in visible], [2, 3])
         self.assertEqual([row.token for row in visible], [2, 3])
@@ -133,21 +133,16 @@ class ViewTests(unittest.TestCase):
         )
         self.assertEqual([row_tokens(tree, row) for row in visible], [(0, 0, 0), (1,), (1,), (1,)])
         self.assertEqual([row.ranks for row in visible], [(0, 0, 0), (1,), (1,), (1,)])
-        self.assertEqual([row.depth for row in visible], [0, 2, 1, 0])
         self.assertEqual(visible[1].parent, second)
-        self.assertEqual(len(visible[1].ancestor_last), 2)
-        self.assertEqual(len(visible[1].ancestor_nats), 2)
-        self.assertAlmostEqual(visible[1].ancestor_nats[0], -math.log(0.6))
-        self.assertAlmostEqual(visible[1].ancestor_nats[1], -math.log(0.6 * 0.8))
 
     def test_enter_requires_discovered_child(self) -> None:
         tree = Tree(distribution(0.5, 0.3, 0.2))
 
         with self.assertRaisesRegex(ValueError, "undiscovered child"):
-            enter(tree, View(node=0, selected_rank=2))
+            enter(tree, View(node=0, first_rank=2))
 
         child = tree.put_child(0, 2, Distribution((), ()))
-        self.assertEqual(enter(tree, View(node=0, selected_rank=2)).node, child)
+        self.assertEqual(enter(tree, View(node=0, first_rank=2)).node, child)
 
     def test_parent_preserves_entered_rank_as_forest_boundary(self) -> None:
         tree = Tree(distribution(0.5, 0.3, 0.2))
@@ -155,15 +150,15 @@ class ViewTests(unittest.TestCase):
 
         self.assertEqual(
             parent(tree, View(node=child)),
-            View(node=0, first_rank=2, selected_rank=2),
+            View(node=0, first_rank=2),
         )
 
-    def test_move_never_crosses_the_tail_boundary(self) -> None:
+    def test_move_scrolls_first_rank_within_revealed_prefix(self) -> None:
         tree = Tree(distribution(0.5, 0.3, 0.2))
-        view = View(node=0, first_rank=1, selected_rank=1)
+        view = View(node=0, first_rank=1)
 
-        self.assertEqual(move(tree, view, -1).selected_rank, 1)
-        self.assertEqual(move(tree, view, 10).selected_rank, 2)
+        self.assertEqual(move(tree, view, -1).first_rank, 0)
+        self.assertEqual(move(tree, view, 10).first_rank, 2)
 
     def test_browsing_does_not_change_dijkstra_frontier(self) -> None:
         table = {

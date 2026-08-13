@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from enum import Enum, auto
 from itertools import islice
 
 from .tree import Edge, NodeId, RankedDistribution, Tree
@@ -15,7 +16,6 @@ class View:
 
     node: NodeId = 0
     first_rank: int = 0
-    selected_rank: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,30 +34,28 @@ class Row:
     expanded: bool
 
 
-@dataclass(frozen=True, slots=True)
-class AncestorConnector:
-    """One visible radix ancestor connector and its exact aggregate surprisal."""
+class BranchRole(Enum):
+    """How one physical radix row leaves its branch point."""
 
-    is_last: bool
-    nats: float
+    CONTINUATION = auto()
+    SIBLING = auto()
 
 
 @dataclass(frozen=True, slots=True)
 class CompactRow:
     """One physical row for one event in the visible probability partition.
 
-    ``edges`` is the structural radix suffix not already factored by earlier
-    rows. Token ids and edge costs are derived from those edges and the tree.
-    ``path_nats`` is the exact event surprisal from the view
-    root. ``edge_nats`` is the aggregate surprisal of the displayed branch from
-    the view root, used only to shade its connector. ``ancestors`` keeps each
-    visible ancestor connector's shape and aggregate surprisal as one value.
+    ``parent`` identifies the row's structural branch point. ``edges`` is the
+    structural radix suffix not already factored by earlier rows. Token ids and
+    edge costs are derived from those edges and the tree. ``path_nats`` is the
+    exact event surprisal from the view root. ``edge_nats`` is the aggregate
+    surprisal of the displayed branch from the view root, used only to shade
+    its connector. ``branch_role`` distinguishes the partition's continuing
+    spine from an ordinary sibling; screen coordinates never determine that
+    semantic role.
     """
 
     parent: NodeId
-    rank: int
-    depth: int
-    ancestors: tuple[AncestorConnector, ...]
     is_last: bool
     edges: tuple[Edge, ...]
     edge_nats: float
@@ -66,14 +64,7 @@ class CompactRow:
     open_ended: bool = False
     forest_count: int = 0
     forest_start: int = 0
-
-    @property
-    def ancestor_last(self) -> tuple[bool, ...]:
-        return tuple(connector.is_last for connector in self.ancestors)
-
-    @property
-    def ancestor_nats(self) -> tuple[float, ...]:
-        return tuple(connector.nats for connector in self.ancestors)
+    branch_role: BranchRole = BranchRole.SIBLING
 
     @property
     def ranks(self) -> tuple[int, ...]:
@@ -119,7 +110,6 @@ class _ForestEvent:
 
 
 type _PartitionEvent = _ConcreteEvent | _ForestEvent
-
 
 type _SuffixMassCache = dict[NodeId, tuple[float, ...]]
 
@@ -193,8 +183,7 @@ def _suffix_mass(
 ) -> float:
     """Return ``P(rank >= start)`` from one backward-built revealed suffix table."""
     distribution = tree[parent].distribution
-    if not 0 <= start <= distribution.revealed:
-        raise IndexError(f"suffix start {start} has not been revealed")
+    assert 0 <= start <= distribution.revealed
 
     suffix = cache.get(parent)
     if suffix is None:
@@ -278,7 +267,12 @@ def partition_rows(
         events[index : index + 1] = split
 
     events.sort(key=_partition_order)
-    return _partition_layout_rows(tree, root, events)
+    return _partition_layout_rows(
+        tree,
+        root,
+        events,
+        root_continuation=start == 0,
+    )
 
 
 def _partition_branch(
@@ -290,8 +284,7 @@ def _partition_branch(
     base_nats: float,
 ) -> _ConcreteEvent:
     distribution = tree[parent].distribution
-    if not 0 <= rank < distribution.revealed:
-        raise IndexError(f"rank {rank} has not been revealed")
+    assert 0 <= rank < distribution.revealed
     return _ConcreteEvent(
         edges=(*prefix_edges, Edge(parent, rank)),
         nats=base_nats + distribution.nats(rank),
@@ -311,8 +304,7 @@ def _partition_range(
     range_nats: float | None = None,
 ) -> _PartitionEvent:
     distribution = tree[parent].distribution
-    if not 0 <= start < end <= len(distribution):
-        raise IndexError((start, end))
+    assert 0 <= start < end <= len(distribution)
     if end - start == 1:
         return _partition_branch(
             tree,
@@ -453,8 +445,7 @@ def _partition_node(tree: Tree, root: NodeId, ranks: tuple[int, ...]) -> NodeId:
     node = root
     for rank in ranks:
         child = tree.child(node, rank)
-        if child is None:
-            raise ValueError("partition prefix crosses an undiscovered edge")
+        assert child is not None
         node = child
     return node
 
@@ -463,11 +454,11 @@ def _partition_layout_rows(
     tree: Tree,
     root: NodeId,
     events: list[_PartitionEvent],
+    *,
+    root_continuation: bool,
 ) -> tuple[CompactRow, ...]:
     children = _partition_children(events)
     edge_nats = _partition_edge_nats(events)
-    branch_prefixes = {prefix for prefix, siblings in children.items() if len(siblings) > 1}
-    represented_roots: set[int] = set()
     rows_out: list[CompactRow] = []
     previous: _PartitionEvent | None = None
 
@@ -476,33 +467,15 @@ def _partition_layout_rows(
         common_ranks = event.ranks[:common]
         parent = _partition_node(tree, root, common_ranks)
 
-        ancestor_prefixes = tuple(
-            event.ranks[:depth] for depth in range(common) if event.ranks[:depth] in branch_prefixes
-        )
-        ancestors = tuple(
-            AncestorConnector(
-                is_last=event.ranks[len(prefix)] == children[prefix][-1],
-                nats=edge_nats[(prefix, event.ranks[len(prefix)])],
-            )
-            for prefix in ancestor_prefixes
-        )
-
         branch_prefix = common_ranks
         branch_child = _partition_child_key(event, common)
         branch_nats = edge_nats[(branch_prefix, branch_child)]
         is_last = branch_child == children[branch_prefix][-1]
-
-        if event.ranks:
-            root_rank = event.ranks[0]
-        elif isinstance(event, _ForestEvent):
-            root_rank = event.start
-        else:
-            raise AssertionError("concrete partition event has no edge")
-
-        representative_rank = -1
-        if isinstance(event, _ConcreteEvent) and root_rank not in represented_roots:
-            representative_rank = root_rank
-            represented_roots.add(root_rank)
+        branch_role = (
+            BranchRole.CONTINUATION
+            if previous is None and root_continuation
+            else BranchRole.SIBLING
+        )
 
         if isinstance(event, _ForestEvent):
             forest_count = event.end - event.start
@@ -518,9 +491,6 @@ def _partition_layout_rows(
         rows_out.append(
             CompactRow(
                 parent=parent,
-                rank=representative_rank,
-                depth=len(ancestors),
-                ancestors=ancestors,
                 is_last=is_last,
                 edges=event.edges[common:],
                 edge_nats=branch_nats,
@@ -529,6 +499,7 @@ def _partition_layout_rows(
                 open_ended=open_ended,
                 forest_count=forest_count,
                 forest_start=forest_start,
+                branch_role=branch_role,
             )
         )
         previous = event
@@ -537,8 +508,8 @@ def _partition_layout_rows(
 
 
 def enter(tree: Tree, view: View) -> View:
-    """Focus the selected child if it has already been discovered."""
-    child = tree.child(view.node, view.selected_rank)
+    """Focus the first visible child if it has already been discovered."""
+    child = tree.child(view.node, view.first_rank)
     if child is None:
         raise ValueError("cannot enter an undiscovered child")
     return View(node=child)
@@ -549,14 +520,14 @@ def parent(tree: Tree, view: View) -> View:
     node = tree[view.node]
     if node.parent is None:
         return view
-    return View(node=node.parent, first_rank=node.rank, selected_rank=node.rank)
+    return View(node=node.parent, first_rank=node.rank)
 
 
 def move(tree: Tree, view: View, delta: int) -> View:
-    """Move selection within the currently revealed sibling prefix."""
+    """Scroll the visible sibling suffix within the revealed prefix."""
     distribution = tree[view.node].distribution
     if distribution.revealed == 0:
         return view
     last = distribution.revealed - 1
-    selected = min(max(view.selected_rank + delta, view.first_rank), last)
-    return View(node=view.node, first_rank=view.first_rank, selected_rank=selected)
+    first_rank = min(max(view.first_rank + delta, 0), last)
+    return View(node=view.node, first_rank=first_rank)
